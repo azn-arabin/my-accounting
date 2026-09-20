@@ -1,0 +1,120 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { db } from '@/db';
+import { transactions, categories, accounts } from '@/db/schema';
+import { eq, desc, and, like, gte, lte, sql, count } from 'drizzle-orm';
+import { getSession } from '@/lib/auth';
+
+export async function GET(request: NextRequest) {
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const searchParams = request.nextUrl.searchParams;
+  const page = parseInt(searchParams.get('page') || '1');
+  const limit = parseInt(searchParams.get('limit') || '20');
+  const type = searchParams.get('type');
+  const categoryId = searchParams.get('categoryId');
+  const accountId = searchParams.get('accountId');
+  const startDate = searchParams.get('startDate');
+  const endDate = searchParams.get('endDate');
+  const search = searchParams.get('search');
+
+  const conditions = [];
+  if (type) conditions.push(eq(transactions.type, type as 'income' | 'expense' | 'transfer'));
+  if (categoryId) conditions.push(eq(transactions.categoryId, parseInt(categoryId)));
+  if (accountId) conditions.push(eq(transactions.accountId, parseInt(accountId)));
+  if (startDate) conditions.push(gte(transactions.date, startDate));
+  if (endDate) conditions.push(lte(transactions.date, endDate));
+  if (search) conditions.push(like(transactions.description, `%${search}%`));
+
+  const where = conditions.length > 0 ? and(...conditions) : undefined;
+
+  const [totalResult] = await db
+    .select({ count: count() })
+    .from(transactions)
+    .where(where);
+
+  const total = totalResult.count;
+  const totalPages = Math.ceil(total / limit);
+  const offset = (page - 1) * limit;
+
+  const rows = await db
+    .select({
+      id: transactions.id,
+      amount: transactions.amount,
+      type: transactions.type,
+      description: transactions.description,
+      date: transactions.date,
+      currency: transactions.currency,
+      categoryId: transactions.categoryId,
+      accountId: transactions.accountId,
+      toAccountId: transactions.toAccountId,
+      createdAt: transactions.createdAt,
+      categoryName: categories.name,
+      categoryColor: categories.color,
+      accountName: accounts.name,
+    })
+    .from(transactions)
+    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .leftJoin(accounts, eq(transactions.accountId, accounts.id))
+    .where(where)
+    .orderBy(desc(transactions.date), desc(transactions.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  return NextResponse.json({ transactions: rows, total, page, totalPages });
+}
+
+export async function POST(request: NextRequest) {
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const body = await request.json();
+  const { amount, type, categoryId, accountId, toAccountId, description, date } = body;
+
+  if (!amount || !type || !categoryId || !accountId || !date) {
+    return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+  }
+
+  const amountInPaisa = Math.round(amount * 100);
+
+  try {
+    const result = await db.transaction(async (tx) => {
+      // Create the transaction
+      const [newTxn] = await tx.insert(transactions).values({
+        amount: amountInPaisa,
+        type,
+        categoryId,
+        accountId,
+        toAccountId: type === 'transfer' ? toAccountId : null,
+        description: description || null,
+        date,
+      }).returning();
+
+      // Update account balances
+      if (type === 'expense') {
+        await tx.update(accounts)
+          .set({ balance: sql`${accounts.balance} - ${amountInPaisa}` })
+          .where(eq(accounts.id, accountId));
+      } else if (type === 'income') {
+        await tx.update(accounts)
+          .set({ balance: sql`${accounts.balance} + ${amountInPaisa}` })
+          .where(eq(accounts.id, accountId));
+      } else if (type === 'transfer' && toAccountId) {
+        await tx.update(accounts)
+          .set({ balance: sql`${accounts.balance} - ${amountInPaisa}` })
+          .where(eq(accounts.id, accountId));
+        await tx.update(accounts)
+          .set({ balance: sql`${accounts.balance} + ${amountInPaisa}` })
+          .where(eq(accounts.id, toAccountId));
+      }
+
+      return newTxn;
+    });
+
+    return NextResponse.json(result, { status: 201 });
+  } catch (error) {
+    console.error('Transaction creation failed:', error);
+    return NextResponse.json({ error: 'Failed to create transaction' }, { status: 500 });
+  }
+}
+
