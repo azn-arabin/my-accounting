@@ -1,417 +1,264 @@
-"use client";
+'use client';
 
-import { useEffect, useState, useMemo } from "react";
-import * as LucideIcons from "lucide-react";
-import { 
-  Card, 
-  CardHeader, 
-  CardTitle, 
-  CardContent 
-} from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { ChevronDown, ChevronRight, Edit2, Plus, Trash2 } from "lucide-react";
+import { useMemo, useState } from 'react';
+import { ChevronDown, CornerDownRight, Pencil, Plus, Trash2, Loader2, Check } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { PageHeader, Refreshable, ErrorBanner } from '@/components/page-header';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { apiFetch, useApi } from '@/lib/use-api';
+import { cn } from '@/lib/utils';
 
-type CategoryType = "income" | "expense" | "transfer";
+type CategoryType = 'income' | 'expense' | 'transfer';
 
 interface Category {
-  id: string;
+  id: number;
   name: string;
   type: CategoryType;
-  parentId: string | null;
+  parentId: number | null;
   icon: string | null;
   color: string | null;
-  isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
 }
 
 interface CategoryNode extends Category {
   children: CategoryNode[];
 }
 
+const TYPE_LABELS: Record<CategoryType, string> = { expense: 'Expense', income: 'Income', transfer: 'Transfer' };
+const SWATCHES = ['#ef4444', '#f97316', '#eab308', '#10b981', '#0d9488', '#3b82f6', '#8b5cf6', '#ec4899', '#64748b'];
+
 export default function CategoriesPage() {
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const { data, error, loading, refreshing, reload } = useApi<Category[]>('/api/categories?flat=true');
+  const categories = useMemo(() => (Array.isArray(data) ? data : []), [data]);
 
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
-  const [formData, setFormData] = useState({
-    name: "",
-    type: "expense" as CategoryType,
-    parentId: "none",
-    icon: "",
-    color: "#000000",
-  });
+  const [collapsed, setCollapsed] = useState<Record<CategoryType, boolean>>({ expense: false, income: false, transfer: false });
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<Category | null>(null);
+  const [form, setForm] = useState({ name: '', type: 'expense' as CategoryType, parentId: 'none', color: SWATCHES[0] });
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [deleting, setDeleting] = useState<Category | null>(null);
 
-  const [expandedTypes, setExpandedTypes] = useState<Record<string, boolean>>({
-    expense: true,
-    income: true,
-    transfer: true,
-  });
-
-  const fetchCategories = async () => {
-    setIsLoading(true);
-    try {
-      const res = await fetch("/api/categories?flat=true");
-      if (res.ok) {
-        const data = await res.json();
-        setCategories(data);
-      }
-    } catch (error) {
-      console.error("Failed to fetch categories", error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchCategories();
-  }, []);
-
-  const handleOpenAdd = (defaultType?: CategoryType, parentId?: string) => {
-    setEditingCategory(null);
-    setFormData({
-      name: "",
-      type: defaultType || "expense",
-      parentId: parentId || "none",
-      icon: "Circle",
-      color: "#3b82f6",
-    });
-    setIsDialogOpen(true);
-  };
-
-  const handleOpenEdit = (category: Category) => {
-    setEditingCategory(category);
-    setFormData({
-      name: category.name,
-      type: category.type,
-      parentId: category.parentId || "none",
-      icon: category.icon || "Circle",
-      color: category.color || "#3b82f6",
-    });
-    setIsDialogOpen(true);
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this category?")) return;
-    try {
-      const res = await fetch(`/api/categories/${id}`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        fetchCategories();
-      }
-    } catch (error) {
-      console.error("Delete failed", error);
-    }
-  };
-
-  const handleSave = async () => {
-    const payload = {
-      name: formData.name,
-      type: formData.type,
-      parentId: formData.parentId === "none" ? null : formData.parentId,
-      icon: formData.icon,
-      color: formData.color,
-    };
-
-    try {
-      if (editingCategory) {
-        const res = await fetch(`/api/categories/${editingCategory.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) fetchCategories();
-      } else {
-        const res = await fetch("/api/categories", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) fetchCategories();
-      }
-      setIsDialogOpen(false);
-    } catch (error) {
-      console.error("Save failed", error);
-    }
-  };
-
-  const toggleTypeExpanded = (type: string) => {
-    setExpandedTypes((prev) => ({
-      ...prev,
-      [type]: !prev[type],
-    }));
-  };
-
-  // Build tree
-  const tree = useMemo(() => {
-    const map = new Map<string, CategoryNode>();
+  const trees = useMemo(() => {
+    const map = new Map<number, CategoryNode>(categories.map(c => [c.id, { ...c, children: [] }]));
     const roots: CategoryNode[] = [];
-
-    categories.forEach((c) => {
-      map.set(c.id, { ...c, children: [] });
-    });
-
-    categories.forEach((c) => {
-      const node = map.get(c.id);
-      if (node) {
-        if (c.parentId && map.has(c.parentId)) {
-          map.get(c.parentId)!.children.push(node);
-        } else {
-          roots.push(node);
-        }
-      }
-    });
-
-    return roots;
+    for (const node of map.values()) {
+      if (node.parentId && map.has(node.parentId)) map.get(node.parentId)!.children.push(node);
+      else roots.push(node);
+    }
+    return {
+      expense: roots.filter(c => c.type === 'expense'),
+      income: roots.filter(c => c.type === 'income'),
+      transfer: roots.filter(c => c.type === 'transfer'),
+    };
   }, [categories]);
 
-  const groupedTrees = useMemo(() => {
-    return {
-      expense: tree.filter((c) => c.type === "expense"),
-      income: tree.filter((c) => c.type === "income"),
-      transfer: tree.filter((c) => c.type === "transfer"),
-    };
-  }, [tree]);
+  const openAdd = (type: CategoryType = 'expense', parentId?: number) => {
+    setEditing(null);
+    setForm({ name: '', type, parentId: parentId ? String(parentId) : 'none', color: SWATCHES[0] });
+    setFormError('');
+    setDialogOpen(true);
+  };
 
-  const renderCategoryRow = (node: CategoryNode, depth = 0) => {
-    const IconComponent = (LucideIcons as any)[node.icon || "Circle"] || LucideIcons.Circle;
+  const openEdit = (c: Category) => {
+    setEditing(c);
+    setForm({ name: c.name, type: c.type, parentId: c.parentId ? String(c.parentId) : 'none', color: c.color || SWATCHES[0] });
+    setFormError('');
+    setDialogOpen(true);
+  };
 
-    return (
-      <div key={node.id} className="flex flex-col">
-        <div 
-          className="flex items-center justify-between py-3 hover:bg-muted/50 rounded-md px-2"
-          style={{ paddingLeft: `${depth * 1.5 + 0.5}rem` }}
-        >
-          <div className="flex items-center gap-3">
-            <div
-              className="w-4 h-4 rounded-full flex-shrink-0"
-              style={{ backgroundColor: node.color || "#ccc" }}
-            />
-            <IconComponent className="w-5 h-5 text-muted-foreground" />
-            <span className="font-medium text-sm">{node.name}</span>
-          </div>
-          <div className="flex items-center gap-1 opacity-60 hover:opacity-100 transition-opacity">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => handleOpenAdd(node.type, node.id)}
-              title="Add Sub-category"
-            >
-              <Plus className="w-4 h-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => handleOpenEdit(node)}
-              title="Edit"
-            >
-              <Edit2 className="w-4 h-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-destructive"
-              onClick={() => handleDelete(node.id)}
-              title="Delete"
-            >
-              <Trash2 className="w-4 h-4" />
-            </Button>
-          </div>
-        </div>
-        {node.children.length > 0 && (
-          <div className="flex flex-col">
-            {node.children.map((child) => renderCategoryRow(child, depth + 1))}
-          </div>
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setFormError('');
+    try {
+      await apiFetch(editing ? `/api/categories/${editing.id}` : '/api/categories', {
+        method: editing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.name.trim(),
+          type: form.type,
+          parentId: form.parentId === 'none' ? null : Number(form.parentId),
+          color: form.color,
+        }),
+      });
+      setDialogOpen(false);
+      reload();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Could not save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Only top-level categories of the same type can be parents (one level of nesting)
+  const parentItems = useMemo(() => {
+    const items: Record<string, string> = { none: 'None (top level)' };
+    for (const c of categories) {
+      if (c.type === form.type && c.parentId === null && c.id !== editing?.id) items[String(c.id)] = c.name;
+    }
+    return items;
+  }, [categories, form.type, editing]);
+
+  const Row = ({ node, child = false }: { node: CategoryNode; child?: boolean }) => (
+    <div className={cn('group flex items-center justify-between gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-muted/50', child && 'pl-9')}>
+      <div className="flex min-w-0 items-center gap-2.5">
+        {child && <CornerDownRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />}
+        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: node.color || 'var(--muted-foreground)' }} />
+        <span className={cn('truncate text-sm', !child && 'font-medium')}>{node.name}</span>
+        {!child && node.children.length > 0 && (
+          <span className="rounded-full bg-muted px-1.5 text-[11px] text-muted-foreground">{node.children.length}</span>
         )}
       </div>
-    );
-  };
-
-  const renderTypeSection = (type: CategoryType, label: string) => {
-    const nodes = groupedTrees[type];
-    const isExpanded = expandedTypes[type];
-    const typeCount = categories.filter((c) => c.type === type).length;
-
-    return (
-      <Card className="mb-6 shadow-sm">
-        <CardHeader 
-          className="py-4 cursor-pointer flex flex-row items-center justify-between bg-muted/30 hover:bg-muted/50 transition-colors"
-          onClick={() => toggleTypeExpanded(type)}
-        >
-          <div className="flex items-center gap-2">
-            {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
-            <CardTitle className="text-lg font-semibold">{label}</CardTitle>
-            <Badge variant="secondary" className="ml-2">{typeCount}</Badge>
-          </div>
-        </CardHeader>
-        {isExpanded && (
-          <CardContent className="pt-4">
-            {nodes.length === 0 ? (
-              <div className="text-center py-6 text-muted-foreground text-sm">
-                No {label.toLowerCase()} categories found.
-              </div>
-            ) : (
-              <div className="flex flex-col gap-1">
-                {nodes.map((node) => renderCategoryRow(node, 0))}
-              </div>
-            )}
-          </CardContent>
+      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+        {!child && (
+          <Button variant="ghost" size="icon-sm" onClick={() => openAdd(node.type, node.id)} aria-label={`Add sub-category to ${node.name}`} title="Add sub-category">
+            <Plus />
+          </Button>
         )}
-      </Card>
-    );
-  };
-
-  const parentOptions = useMemo(() => {
-    return categories
-      .filter((c) => c.type === formData.type && c.id !== editingCategory?.id)
-      .map((c) => ({ value: c.id, label: c.name }));
-  }, [categories, formData.type, editingCategory]);
-
-  return (
-    <div className="max-w-4xl mx-auto p-4 md:p-6 space-y-6">
-      <div className="flex justify-between items-center">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Categories</h1>
-          <p className="text-muted-foreground text-sm mt-1">Manage your income, expense, and transfer categories.</p>
-        </div>
-        <Button onClick={() => handleOpenAdd()}>
-          <Plus className="w-4 h-4 mr-2" />
-          Add Category
+        <Button variant="ghost" size="icon-sm" onClick={() => openEdit(node)} aria-label={`Edit ${node.name}`} title="Edit"><Pencil /></Button>
+        <Button variant="ghost" size="icon-sm" className="text-destructive hover:text-destructive" onClick={() => setDeleting(node)} aria-label={`Delete ${node.name}`} title="Delete">
+          <Trash2 />
         </Button>
       </div>
+    </div>
+  );
 
-      {isLoading ? (
-        <div className="flex justify-center items-center py-12">
-          <div className="animate-spin w-8 h-8 border-4 border-primary border-t-transparent rounded-full" />
-        </div>
+  return (
+    <>
+      <PageHeader
+        title="Categories"
+        description="Group your income, expenses and transfers"
+        actions={<Button onClick={() => openAdd()}><Plus /> Add category</Button>}
+      />
+
+      {error && <ErrorBanner message={error} onRetry={reload} />}
+
+      {loading ? (
+        <div className="space-y-4">{[0, 1, 2].map(i => <div key={i} className="h-40 animate-pulse rounded-xl border bg-muted/40" />)}</div>
       ) : (
-        <div className="mt-6">
-          {renderTypeSection("expense", "Expense Categories")}
-          {renderTypeSection("income", "Income Categories")}
-          {renderTypeSection("transfer", "Transfer Categories")}
-        </div>
+        <Refreshable refreshing={refreshing} className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          {(['expense', 'income', 'transfer'] as const).map((type) => {
+            const nodes = trees[type];
+            const count = categories.filter(c => c.type === type).length;
+            const isCollapsed = collapsed[type];
+            return (
+              <section key={type} className={cn('rounded-xl border bg-card shadow-xs', type === 'expense' && 'lg:row-span-2')}>
+                <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
+                  <button
+                    type="button"
+                    className="flex items-center gap-2 text-sm font-semibold"
+                    onClick={() => setCollapsed(c => ({ ...c, [type]: !c[type] }))}
+                    aria-expanded={!isCollapsed}
+                  >
+                    <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', isCollapsed && '-rotate-90')} />
+                    {TYPE_LABELS[type]}
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-normal text-muted-foreground">{count}</span>
+                  </button>
+                  <Button variant="ghost" size="sm" onClick={() => openAdd(type)}><Plus /> Add</Button>
+                </div>
+                {!isCollapsed && (
+                  <div className="p-2">
+                    {nodes.length === 0 ? (
+                      <p className="py-6 text-center text-sm text-muted-foreground">No {type} categories yet.</p>
+                    ) : (
+                      nodes.map((node) => (
+                        <div key={node.id}>
+                          <Row node={node} />
+                          {node.children.map((child) => <Row key={child.id} node={child} child />)}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </section>
+            );
+          })}
+        </Refreshable>
       )}
 
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="sm:max-w-[425px]">
+      <Dialog open={dialogOpen} onOpenChange={(o) => { if (!saving) setDialogOpen(o); }}>
+        <DialogContent>
           <DialogHeader>
-            <DialogTitle>{editingCategory ? "Edit Category" : "Add Category"}</DialogTitle>
+            <DialogTitle>{editing ? 'Edit category' : 'Add category'}</DialogTitle>
           </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
-              <Label htmlFor="name">Name</Label>
-              <Input
-                id="name"
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                placeholder="e.g. Groceries"
-              />
+          <form onSubmit={handleSave} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="cat-name">Name</Label>
+              <Input id="cat-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Groceries" required autoFocus />
             </div>
 
-            <div className="grid gap-2">
-              <Label htmlFor="type">Type</Label>
-              <Select
-                  value={formData.type}
-                  onValueChange={(val) => {
-                    setFormData({ ...formData, type: (val as any) || 'expense', parentId: '' });
-                  }}
-                  disabled={!!editingCategory} // Cannot change type of existing category
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Type</Label>
+                <Select
+                  items={TYPE_LABELS}
+                  value={form.type}
+                  onValueChange={(v) => setForm({ ...form, type: (v as CategoryType) || 'expense', parentId: 'none' })}
+                  disabled={!!editing}
                 >
-                <SelectTrigger id="type">
-                  <SelectValue placeholder="Select type" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="expense">Expense</SelectItem>
-                  <SelectItem value="income">Income</SelectItem>
-                  <SelectItem value="transfer">Transfer</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="parentId">Parent Category</Label>
-              <Select
-                value={formData.parentId}
-                onValueChange={(val) => setFormData({ ...formData, parentId: val || '' })}
-              >
-                <SelectTrigger id="parentId">
-                  <SelectValue placeholder="Select parent category" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None (Root Category)</SelectItem>
-                  {parentOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label htmlFor="icon">Icon (Lucide)</Label>
-                <Input
-                  id="icon"
-                  value={formData.icon}
-                  onChange={(e) => setFormData({ ...formData, icon: e.target.value })}
-                  placeholder="e.g. ShoppingCart"
-                />
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(TYPE_LABELS) as CategoryType[]).map(t => <SelectItem key={t} value={t}>{TYPE_LABELS[t]}</SelectItem>)}
+                  </SelectContent>
+                </Select>
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="color">Color</Label>
-                <div className="flex gap-2">
-                  <Input
-                    id="color-picker"
-                    type="color"
-                    value={formData.color}
-                    onChange={(e) => setFormData({ ...formData, color: e.target.value })}
-                    className="w-12 p-1 px-1"
-                  />
-                  <Input
-                    id="color"
-                    type="text"
-                    value={formData.color}
-                    onChange={(e) => setFormData({ ...formData, color: e.target.value })}
-                    placeholder="#000000"
-                    className="flex-1"
-                  />
-                </div>
+              <div className="space-y-2">
+                <Label>Parent</Label>
+                <Select items={parentItems} value={form.parentId} onValueChange={(v) => setForm({ ...form, parentId: (v as string) || 'none' })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent className="max-h-72">
+                    {Object.entries(parentItems).map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleSave} disabled={!formData.name.trim()}>
-              Save Category
-            </Button>
-          </DialogFooter>
+
+            <div className="space-y-2">
+              <Label>Color</Label>
+              <div className="flex flex-wrap gap-2">
+                {SWATCHES.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setForm({ ...form, color: c })}
+                    className="flex h-8 w-8 items-center justify-center rounded-full ring-offset-2 ring-offset-background transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                    style={{ backgroundColor: c }}
+                    aria-label={`Color ${c}`}
+                    aria-pressed={form.color === c}
+                  >
+                    {form.color === c && <Check className="h-4 w-4 text-white" />}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {formError && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{formError}</p>}
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>Cancel</Button>
+              <Button type="submit" disabled={saving || !form.name.trim()}>
+                {saving && <Loader2 className="animate-spin" />}
+                {editing ? 'Save changes' : 'Add category'}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
-    </div>
+
+      <ConfirmDialog
+        open={!!deleting}
+        onOpenChange={(o) => !o && setDeleting(null)}
+        title={`Delete ${deleting?.name ?? 'category'}?`}
+        description="It and its sub-categories are hidden from new entries; existing transactions keep their category."
+        onConfirm={async () => {
+          await apiFetch(`/api/categories/${deleting!.id}`, { method: 'DELETE' });
+          reload();
+        }}
+      />
+    </>
   );
 }

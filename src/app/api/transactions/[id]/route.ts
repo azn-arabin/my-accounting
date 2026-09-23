@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { transactions, accounts, categories } from '@/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { getSession } from '@/lib/auth';
+import { validateTransaction } from '@/lib/transaction-validation';
+
+/** Transaction ids belonging to the user (via its source account). */
+function ownedBy(txnId: number, userId: number) {
+  return and(
+    eq(transactions.id, txnId),
+    sql`${transactions.accountId} IN (SELECT ${accounts.id} FROM ${accounts} WHERE ${accounts.userId} = ${userId})`,
+  );
+}
 
 export async function GET(
   request: NextRequest,
@@ -31,7 +40,7 @@ export async function GET(
     .from(transactions)
     .leftJoin(categories, eq(transactions.categoryId, categories.id))
     .leftJoin(accounts, eq(transactions.accountId, accounts.id))
-    .where(eq(transactions.id, txnId));
+    .where(ownedBy(txnId, session.userId));
 
   if (!txn) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   return NextResponse.json(txn);
@@ -51,8 +60,21 @@ export async function PUT(
   try {
     const result = await db.transaction(async (tx) => {
       // Get existing transaction
-      const [existing] = await tx.select().from(transactions).where(eq(transactions.id, txnId));
+      const [existing] = await tx.select().from(transactions).where(ownedBy(txnId, session.userId));
       if (!existing) throw new Error('Not found');
+
+      // Validate the merged (existing + changed) values
+      const validated = await validateTransaction(session.userId, {
+        amount: body.amount ?? existing.amount / 100,
+        type: body.type ?? existing.type,
+        categoryId: body.categoryId ?? existing.categoryId,
+        accountId: body.accountId ?? existing.accountId,
+        toAccountId: body.toAccountId ?? existing.toAccountId,
+        description: body.description !== undefined ? body.description : existing.description,
+        date: body.date ?? existing.date,
+      });
+      if ('error' in validated) throw new ValidationError(validated.error);
+      const next = validated.data;
 
       // Reverse old balance effects
       if (existing.type === 'expense') {
@@ -73,19 +95,20 @@ export async function PUT(
       }
 
       // Update transaction
-      const newAmount = body.amount ? Math.round(body.amount * 100) : existing.amount;
-      const newType = body.type || existing.type;
-      const newAccountId = body.accountId || existing.accountId;
-      const newToAccountId = newType === 'transfer' ? (body.toAccountId || existing.toAccountId) : null;
+      const newAmount = next.amount;
+      const newType = next.type;
+      const newAccountId = next.accountId;
+      const newToAccountId = next.toAccountId;
 
       const [updated] = await tx.update(transactions).set({
         amount: newAmount,
         type: newType,
-        categoryId: body.categoryId || existing.categoryId,
+        categoryId: next.categoryId,
         accountId: newAccountId,
         toAccountId: newToAccountId,
-        description: body.description !== undefined ? body.description : existing.description,
-        date: body.date || existing.date,
+        description: next.description,
+        date: next.date,
+        currency: next.currency,
       }).where(eq(transactions.id, txnId)).returning();
 
       // Apply new balance effects
@@ -111,6 +134,7 @@ export async function PUT(
 
     return NextResponse.json(result);
   } catch (error: unknown) {
+    if (error instanceof ValidationError) return NextResponse.json({ error: error.message }, { status: 400 });
     const message = error instanceof Error ? error.message : 'Update failed';
     if (message === 'Not found') return NextResponse.json({ error: 'Not found' }, { status: 404 });
     console.error('Transaction update failed:', error);
@@ -130,7 +154,7 @@ export async function DELETE(
 
   try {
     await db.transaction(async (tx) => {
-      const [existing] = await tx.select().from(transactions).where(eq(transactions.id, txnId));
+      const [existing] = await tx.select().from(transactions).where(ownedBy(txnId, session.userId));
       if (!existing) throw new Error('Not found');
 
       // Reverse balance effects
@@ -163,3 +187,5 @@ export async function DELETE(
   }
 }
 
+
+class ValidationError extends Error {}

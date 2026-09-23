@@ -1,4 +1,4 @@
-import { pgTable, serial, integer, text, date, varchar, timestamp, pgEnum, index } from 'drizzle-orm/pg-core';
+import { pgTable, serial, integer, text, date, varchar, boolean, timestamp, pgEnum, index } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 import { accounts } from './accounts';
 import { categories } from './categories';
@@ -15,6 +15,8 @@ export const transactions = pgTable('transactions', {
   description: text('description'),
   date: date('date').notNull(),
   currency: varchar('currency', { length: 3 }).default('BDT').notNull(),
+  // Imported from the SMS backup (partly estimated) rather than entered day by day
+  isHistorical: boolean('is_historical').default(false).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true })
     .defaultNow()
@@ -26,6 +28,7 @@ export const transactions = pgTable('transactions', {
     accountIdIdx: index('transaction_account_id_idx').on(table.accountId),
     toAccountIdIdx: index('transaction_to_account_id_idx').on(table.toAccountId),
     dateIdx: index('transaction_date_idx').on(table.date),
+    isHistoricalIdx: index('transaction_is_historical_idx').on(table.isHistorical),
   };
 });
 

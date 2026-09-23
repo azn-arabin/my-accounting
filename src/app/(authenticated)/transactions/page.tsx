@@ -1,57 +1,43 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { Plus, MoreHorizontal, Pencil, Trash2, Search, X, ChevronLeft, ChevronRight, Loader2, Inbox } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Skeleton } from '@/components/ui/skeleton';
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from '@/components/ui/table';
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
-} from '@/components/ui/dialog';
-import {
-  Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue,
-} from '@/components/ui/select';
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { formatCurrency, formatDate, getTypeBadgeVariant, toPaisa, fromPaisa } from '@/lib/formatters';
-import { Plus, MoreHorizontal, Pencil, Trash2, Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { PageHeader, Refreshable, ErrorBanner } from '@/components/page-header';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { TxnAmount, TxnTypeIcon, HistoricalBadge, type TxnType } from '@/components/txn-bits';
+import { formatCurrency, formatDate, fromPaisa } from '@/lib/formatters';
+import { useHistoricalMode } from '@/lib/use-historical-mode';
+import { apiFetch, useApi } from '@/lib/use-api';
+import { cn } from '@/lib/utils';
 
 interface Transaction {
   id: number;
   amount: number;
-  type: 'income' | 'expense' | 'transfer';
+  type: TxnType;
   description: string | null;
   date: string;
   categoryId: number;
   accountId: number;
   toAccountId: number | null;
   categoryName: string | null;
-  categoryColor: string | null;
   accountName: string | null;
+  isHistorical: boolean;
 }
 
-interface Category {
-  id: number;
-  name: string;
-  type: string;
-  parentId: number | null;
-}
-
-interface Account {
-  id: number;
-  name: string;
-  type: string;
-}
+interface Category { id: number; name: string; type: TxnType; parentId: number | null }
+interface Account { id: number; name: string; type: string }
 
 interface FormData {
   amount: string;
-  type: 'income' | 'expense' | 'transfer';
+  type: TxnType;
   categoryId: string;
   accountId: string;
   toAccountId: string;
@@ -59,86 +45,74 @@ interface FormData {
   date: string;
 }
 
-const defaultForm: FormData = {
-  amount: '',
-  type: 'expense',
-  categoryId: '',
-  accountId: '',
-  toAccountId: '',
-  description: '',
-  date: new Date().toISOString().split('T')[0],
-};
+const today = () => new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD in local time
+const emptyForm = (): FormData => ({ amount: '', type: 'expense', categoryId: '', accountId: '', toAccountId: '', description: '', date: today() });
+
+const TYPE_ITEMS: Record<string, string> = { all: 'All types', income: 'Income', expense: 'Expense', transfer: 'Transfer' };
+const PAGE_SIZE = 20;
 
 export default function TransactionsPage() {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [allAccounts, setAllAccounts] = useState<Account[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
+  const { mode } = useHistoricalMode();
 
   // Filters
-  const [filterType, setFilterType] = useState('');
-  const [filterCategoryId, setFilterCategoryId] = useState('');
-  const [filterAccountId, setFilterAccountId] = useState('');
+  const [page, setPage] = useState(1);
+  const [filterType, setFilterType] = useState('all');
+  const [filterCategoryId, setFilterCategoryId] = useState('all');
+  const [filterAccountId, setFilterAccountId] = useState('all');
   const [filterStartDate, setFilterStartDate] = useState('');
   const [filterEndDate, setFilterEndDate] = useState('');
+  const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
 
-  // Dialog
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [form, setForm] = useState<FormData>(defaultForm);
-  const [saving, setSaving] = useState(false);
+  // Debounce the search box so typing doesn't fire a request per key
+  useEffect(() => {
+    const t = setTimeout(() => { setSearch(searchInput.trim()); setPage(1); }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
-  const fetchTransactions = useCallback(async () => {
-    setLoading(true);
-    const params = new URLSearchParams();
-    params.set('page', page.toString());
-    params.set('limit', '20');
-    if (filterType) params.set('type', filterType);
-    if (filterCategoryId) params.set('categoryId', filterCategoryId);
-    if (filterAccountId) params.set('accountId', filterAccountId);
-    if (filterStartDate) params.set('startDate', filterStartDate);
-    if (filterEndDate) params.set('endDate', filterEndDate);
-    if (search) params.set('search', search);
+  const listUrl = useMemo(() => {
+    const p = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE), historical: mode });
+    if (filterType !== 'all') p.set('type', filterType);
+    if (filterCategoryId !== 'all') p.set('categoryId', filterCategoryId);
+    if (filterAccountId !== 'all') p.set('accountId', filterAccountId);
+    if (filterStartDate) p.set('startDate', filterStartDate);
+    if (filterEndDate) p.set('endDate', filterEndDate);
+    if (search) p.set('search', search);
+    return `/api/transactions?${p}`;
+  }, [page, mode, filterType, filterCategoryId, filterAccountId, filterStartDate, filterEndDate, search]);
 
-    const res = await fetch(`/api/transactions?${params}`);
-    const data = await res.json();
-    setTransactions(data.transactions || []);
-    setTotal(data.total || 0);
-    setTotalPages(data.totalPages || 1);
-    setLoading(false);
-  }, [page, filterType, filterCategoryId, filterAccountId, filterStartDate, filterEndDate, search]);
+  const list = useApi<{ transactions: Transaction[]; total: number; totalPages: number }>(listUrl);
+  const cats = useApi<Category[]>('/api/categories?flat=true');
+  const accs = useApi<{ accounts: Account[] }>('/api/accounts');
+  const categories = useMemo(() => (Array.isArray(cats.data) ? cats.data : []), [cats.data]);
+  const accounts = useMemo(() => accs.data?.accounts ?? [], [accs.data]);
 
-  const fetchMeta = useCallback(async () => {
-    const [catRes, accRes] = await Promise.all([
-      fetch('/api/categories?flat=true'),
-      fetch('/api/accounts'),
-    ]);
-    const catData = await catRes.json();
-    const accData = await accRes.json();
-    setCategories(Array.isArray(catData) ? catData : []);
-    setAllAccounts(Array.isArray(accData) ? accData : []);
-  }, []);
+  const categoryItems = useMemo(() => Object.fromEntries(categories.map(c => [String(c.id), c.name])), [categories]);
+  const accountItems = useMemo(() => Object.fromEntries(accounts.map(a => [String(a.id), a.name])), [accounts]);
 
-  useEffect(() => { fetchMeta(); }, [fetchMeta]);
-  useEffect(() => { fetchTransactions(); }, [fetchTransactions]);
-
+  const hasActiveFilters = filterType !== 'all' || filterCategoryId !== 'all' || filterAccountId !== 'all' || filterStartDate || filterEndDate || searchInput;
   const clearFilters = () => {
-    setFilterType('');
-    setFilterCategoryId('');
-    setFilterAccountId('');
+    setFilterType('all');
+    setFilterCategoryId('all');
+    setFilterAccountId('all');
     setFilterStartDate('');
     setFilterEndDate('');
-    setSearch('');
+    setSearchInput('');
     setPage(1);
   };
 
+  // Add / edit dialog
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [form, setForm] = useState<FormData>(emptyForm);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [deleting, setDeleting] = useState<Transaction | null>(null);
+
   const openAdd = () => {
     setEditingId(null);
-    setForm(defaultForm);
+    setForm(emptyForm());
+    setFormError('');
     setDialogOpen(true);
   };
 
@@ -147,321 +121,310 @@ export default function TransactionsPage() {
     setForm({
       amount: fromPaisa(txn.amount).toString(),
       type: txn.type,
-      categoryId: txn.categoryId.toString(),
-      accountId: txn.accountId.toString(),
-      toAccountId: txn.toAccountId?.toString() || '',
+      categoryId: String(txn.categoryId),
+      accountId: String(txn.accountId),
+      toAccountId: txn.toAccountId ? String(txn.toAccountId) : '',
       description: txn.description || '',
       date: txn.date,
     });
+    setFormError('');
     setDialogOpen(true);
   };
 
-  const handleSave = async () => {
-    if (!form.amount || !form.categoryId || !form.accountId || !form.date) return;
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
     setSaving(true);
-
-    const payload = {
-      amount: parseFloat(form.amount),
-      type: form.type,
-      categoryId: parseInt(form.categoryId),
-      accountId: parseInt(form.accountId),
-      toAccountId: form.type === 'transfer' && form.toAccountId ? parseInt(form.toAccountId) : null,
-      description: form.description || null,
-      date: form.date,
-    };
-
-    const url = editingId ? `/api/transactions/${editingId}` : '/api/transactions';
-    const method = editingId ? 'PUT' : 'POST';
-
-    await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    setSaving(false);
-    setDialogOpen(false);
-    fetchTransactions();
+    setFormError('');
+    try {
+      await apiFetch(editingId ? `/api/transactions/${editingId}` : '/api/transactions', {
+        method: editingId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: parseFloat(form.amount),
+          type: form.type,
+          categoryId: form.categoryId ? parseInt(form.categoryId) : null,
+          accountId: form.accountId ? parseInt(form.accountId) : null,
+          toAccountId: form.type === 'transfer' && form.toAccountId ? parseInt(form.toAccountId) : null,
+          description: form.description || null,
+          date: form.date,
+        }),
+      });
+      setDialogOpen(false);
+      list.reload();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Could not save');
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const handleDelete = async (id: number) => {
-    if (!confirm('Delete this transaction?')) return;
-    await fetch(`/api/transactions/${id}`, { method: 'DELETE' });
-    fetchTransactions();
-  };
+  const formCategories = categories.filter(c => c.type === form.type);
+  const rootCats = formCategories.filter(c => c.parentId === null);
+  const childrenOf = (id: number) => formCategories.filter(c => c.parentId === id);
 
-  const filteredCategories = form.type
-    ? categories.filter(c => c.type === form.type)
-    : categories;
-
-  // Group categories by parent for display in select
-  const rootCats = filteredCategories.filter(c => c.parentId === null);
-  const getChildren = (parentId: number) => filteredCategories.filter(c => c.parentId === parentId);
-
-  const hasActiveFilters = filterType || filterCategoryId || filterAccountId || filterStartDate || filterEndDate || search;
+  const txns = list.data?.transactions ?? [];
+  const total = list.data?.total ?? 0;
+  const totalPages = Math.max(list.data?.totalPages ?? 1, 1);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold tracking-tight">Transactions</h1>
-        <Button onClick={openAdd}>
-          <Plus className="mr-2 h-4 w-4" /> Add Transaction
+    <>
+      <PageHeader
+        title="Transactions"
+        description={list.data ? `${total.toLocaleString()} transaction${total === 1 ? '' : 's'}` : 'Every income, expense and transfer'}
+        actions={<Button onClick={openAdd}><Plus /> Add transaction</Button>}
+      />
+
+      {/* Filters */}
+      <div className="grid grid-cols-1 gap-3 rounded-xl border bg-card p-3 shadow-xs sm:grid-cols-2 lg:grid-cols-[minmax(0,1.5fr)_repeat(3,minmax(0,1fr))_auto_auto_auto]">
+        <div className="relative sm:col-span-2 lg:col-span-1">
+          <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input placeholder="Search description…" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} className="pl-9" />
+        </div>
+        <Select items={TYPE_ITEMS} value={filterType} onValueChange={(v) => { setFilterType((v as string) || 'all'); setPage(1); }}>
+          <SelectTrigger aria-label="Type"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {Object.entries(TYPE_ITEMS).map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <Select items={{ all: 'All categories', ...categoryItems }} value={filterCategoryId} onValueChange={(v) => { setFilterCategoryId((v as string) || 'all'); setPage(1); }}>
+          <SelectTrigger aria-label="Category"><SelectValue /></SelectTrigger>
+          <SelectContent className="max-h-80">
+            <SelectItem value="all">All categories</SelectItem>
+            {(['expense', 'income', 'transfer'] as const).map(t => {
+              const group = categories.filter(c => c.type === t);
+              if (!group.length) return null;
+              return (
+                <SelectGroup key={t}>
+                  <SelectLabel className="capitalize">{t}</SelectLabel>
+                  {group.map(c => (
+                    <SelectItem key={c.id} value={String(c.id)} className={c.parentId ? 'pl-5' : undefined}>{c.name}</SelectItem>
+                  ))}
+                </SelectGroup>
+              );
+            })}
+          </SelectContent>
+        </Select>
+        <Select items={{ all: 'All accounts', ...accountItems }} value={filterAccountId} onValueChange={(v) => { setFilterAccountId((v as string) || 'all'); setPage(1); }}>
+          <SelectTrigger aria-label="Account"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All accounts</SelectItem>
+            {accounts.map(a => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <Input type="date" aria-label="From date" value={filterStartDate} onChange={(e) => { setFilterStartDate(e.target.value); setPage(1); }} />
+        <Input type="date" aria-label="To date" value={filterEndDate} onChange={(e) => { setFilterEndDate(e.target.value); setPage(1); }} />
+        <Button variant="ghost" onClick={clearFilters} disabled={!hasActiveFilters} className={cn(!hasActiveFilters && 'invisible')}>
+          <X /> Clear
         </Button>
       </div>
 
-      {/* Filters */}
-      <Card className="p-4">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search..."
-              value={search}
-              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-              className="pl-9"
-            />
-          </div>
-          <Select value={filterType} onValueChange={(v) => { setFilterType(v === 'all' || !v ? '' : v); setPage(1); }}>
-            <SelectTrigger><SelectValue placeholder="All Types" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Types</SelectItem>
-              <SelectItem value="income">Income</SelectItem>
-              <SelectItem value="expense">Expense</SelectItem>
-              <SelectItem value="transfer">Transfer</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={filterAccountId} onValueChange={(v) => { setFilterAccountId(v === 'all' || !v ? '' : v); setPage(1); }}>
-            <SelectTrigger><SelectValue placeholder="All Accounts" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Accounts</SelectItem>
-              {allAccounts.map(a => <SelectItem key={a.id} value={a.id.toString()}>{a.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
-          <Input
-            type="date"
-            value={filterStartDate}
-            onChange={(e) => { setFilterStartDate(e.target.value); setPage(1); }}
-            placeholder="Start Date"
-          />
-          <Input
-            type="date"
-            value={filterEndDate}
-            onChange={(e) => { setFilterEndDate(e.target.value); setPage(1); }}
-            placeholder="End Date"
-          />
-          {hasActiveFilters && (
-            <Button variant="ghost" onClick={clearFilters} className="gap-1">
-              <X className="h-4 w-4" /> Clear
-            </Button>
-          )}
-        </div>
-      </Card>
+      {list.error && <ErrorBanner message={list.error} onRetry={list.reload} />}
 
       {/* Table */}
-      <Card>
-        {loading ? (
-          <div className="p-4 space-y-3">
-            {[1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-12 w-full" />)}
+      <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
+        {list.loading ? (
+          <div className="space-y-3 p-4">
+            {Array.from({ length: 8 }, (_, i) => <div key={i} className="h-11 animate-pulse rounded-lg bg-muted/50" />)}
           </div>
-        ) : transactions.length === 0 ? (
-          <div className="p-12 text-center">
-            <p className="text-muted-foreground">No transactions found</p>
-            <Button variant="outline" className="mt-4" onClick={openAdd}>Add your first transaction</Button>
+        ) : txns.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-muted"><Inbox className="h-5 w-5 text-muted-foreground" /></span>
+            <div>
+              <p className="font-medium">No transactions found</p>
+              <p className="text-sm text-muted-foreground">{hasActiveFilters ? 'Try clearing the filters.' : 'Add your first transaction to get started.'}</p>
+            </div>
+            {hasActiveFilters ? <Button variant="outline" onClick={clearFilters}>Clear filters</Button> : <Button onClick={openAdd}><Plus /> Add transaction</Button>}
           </div>
         ) : (
-          <>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead>Category</TableHead>
-                  <TableHead>Account</TableHead>
-                  <TableHead className="text-right">Amount</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead className="w-10" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {transactions.map((txn) => (
-                  <TableRow key={txn.id}>
-                    <TableCell className="text-sm">{formatDate(txn.date)}</TableCell>
-                    <TableCell className="font-medium text-sm">{txn.description || '-'}</TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <div className="h-2 w-2 rounded-full" style={{ backgroundColor: txn.categoryColor || '#6b7280' }} />
-                        <span className="text-sm">{txn.categoryName}</span>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-sm">{txn.accountName}</TableCell>
-                    <TableCell className={`text-right font-semibold text-sm ${
-                      txn.type === 'income' ? 'text-green-600 dark:text-green-400' :
-                      txn.type === 'expense' ? 'text-red-600 dark:text-red-400' :
-                      'text-blue-600 dark:text-blue-400'
-                    }`}>
-                      {txn.type === 'income' ? '+' : txn.type === 'expense' ? '-' : '↔'}
-                      {formatCurrency(txn.amount)}
-                    </TableCell>
-                    <TableCell>
-                      <span className={`text-xs px-2 py-1 rounded-full font-medium ${getTypeBadgeVariant(txn.type)}`}>
-                        {txn.type}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger>
-                          <Button variant="ghost" size="icon" className="h-8 w-8">
-                            <MoreHorizontal className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => openEdit(txn)}>
-                            <Pencil className="mr-2 h-4 w-4" /> Edit
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleDelete(txn.id)} className="text-destructive">
-                            <Trash2 className="mr-2 h-4 w-4" /> Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
+          <Refreshable refreshing={list.refreshing}>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/40 hover:bg-muted/40">
+                    <TableHead className="w-28 pl-4">Date</TableHead>
+                    <TableHead>Description</TableHead>
+                    <TableHead>Category</TableHead>
+                    <TableHead>Account</TableHead>
+                    <TableHead className="text-right">Amount</TableHead>
+                    <TableHead className="w-12 pr-4" />
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {txns.map((txn) => (
+                    <TableRow key={txn.id} className="group">
+                      <TableCell className="pl-4 text-sm whitespace-nowrap text-muted-foreground">{formatDate(txn.date)}</TableCell>
+                      <TableCell>
+                        <div className="flex min-w-0 items-center gap-3">
+                          <TxnTypeIcon type={txn.type} className="h-7 w-7" />
+                          <span className="max-w-[28ch] truncate text-sm font-medium">{txn.description || '—'}</span>
+                          {txn.isHistorical && <HistoricalBadge />}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm">{txn.categoryName}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {txn.accountName}
+                        {txn.type === 'transfer' && txn.toAccountId && accountItems[String(txn.toAccountId)] && (
+                          <> → {accountItems[String(txn.toAccountId)]}</>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right"><TxnAmount type={txn.type} amount={txn.amount} className="text-sm" /></TableCell>
+                      <TableCell className="pr-4">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Actions" className="opacity-60 group-hover:opacity-100 data-popup-open:opacity-100" />}>
+                            <MoreHorizontal />
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => openEdit(txn)}><Pencil /> Edit</DropdownMenuItem>
+                            <DropdownMenuItem variant="destructive" onClick={() => setDeleting(txn)}><Trash2 /> Delete</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
 
-            {/* Pagination */}
-            <div className="flex items-center justify-between border-t px-4 py-3">
-              <p className="text-sm text-muted-foreground">
-                {total} transaction{total !== 1 ? 's' : ''} total
+            <div className="flex items-center justify-between border-t px-4 py-3 text-sm">
+              <p className="text-muted-foreground">
+                {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total.toLocaleString()}
               </p>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="icon" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>
-                  <ChevronLeft className="h-4 w-4" />
-                </Button>
-                <span className="text-sm">Page {page} of {totalPages}</span>
-                <Button variant="outline" size="icon" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
+                <Button variant="outline" size="icon-sm" disabled={page <= 1} onClick={() => setPage(p => p - 1)} aria-label="Previous page"><ChevronLeft /></Button>
+                <span className="tabular min-w-20 text-center text-muted-foreground">Page {page} / {totalPages}</span>
+                <Button variant="outline" size="icon-sm" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)} aria-label="Next page"><ChevronRight /></Button>
               </div>
             </div>
-          </>
+          </Refreshable>
         )}
-      </Card>
+      </div>
 
-      {/* Add/Edit Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+      {/* Add / edit */}
+      <Dialog open={dialogOpen} onOpenChange={(o) => { if (!saving) setDialogOpen(o); }}>
+        <DialogContent>
           <DialogHeader>
-            <DialogTitle>{editingId ? 'Edit Transaction' : 'Add Transaction'}</DialogTitle>
+            <DialogTitle>{editingId ? 'Edit transaction' : 'Add transaction'}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 pt-2">
-            {/* Type Selector */}
-            <div className="grid grid-cols-3 gap-2">
+          <form onSubmit={handleSave} className="space-y-4">
+            {/* Type segmented control */}
+            <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1" role="radiogroup" aria-label="Type">
               {(['expense', 'income', 'transfer'] as const).map((t) => (
-                <Button
+                <button
                   key={t}
-                  variant={form.type === t ? 'default' : 'outline'}
-                  size="sm"
+                  type="button"
+                  role="radio"
+                  aria-checked={form.type === t}
                   onClick={() => setForm(f => ({ ...f, type: t, categoryId: '', toAccountId: '' }))}
-                  className={form.type === t ? (
-                    t === 'expense' ? 'bg-red-600 hover:bg-red-700' :
-                    t === 'income' ? 'bg-green-600 hover:bg-green-700' :
-                    'bg-blue-600 hover:bg-blue-700'
-                  ) : ''}
+                  className={cn(
+                    'rounded-md py-1.5 text-sm font-medium capitalize transition-all',
+                    form.type === t ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                  )}
                 >
-                  {t.charAt(0).toUpperCase() + t.slice(1)}
-                </Button>
+                  {t}
+                </button>
               ))}
             </div>
 
-            {/* Amount */}
-            <div>
-              <Label>Amount (৳)</Label>
+            <div className="space-y-2">
+              <Label htmlFor="txn-amount">Amount (৳)</Label>
               <Input
+                id="txn-amount"
                 type="number"
+                inputMode="decimal"
                 placeholder="0.00"
                 value={form.amount}
                 onChange={(e) => setForm(f => ({ ...f, amount: e.target.value }))}
-                min="0"
+                min="0.01"
                 step="0.01"
-                className="text-lg font-semibold"
+                required
+                autoFocus
+                className="h-11 text-lg font-semibold"
               />
             </div>
 
-            {/* Category */}
-            <div>
+            <div className="space-y-2">
               <Label>Category</Label>
-              <Select value={form.categoryId} onValueChange={(v) => setForm(f => ({ ...f, categoryId: v || '' }))}>
+              <Select items={categoryItems} value={form.categoryId || null} onValueChange={(v) => setForm(f => ({ ...f, categoryId: (v as string) || '' }))}>
                 <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
-                <SelectContent>
+                <SelectContent className="max-h-72">
                   {rootCats.map(root => {
-                    const children = getChildren(root.id);
-                    if (children.length > 0) {
-                      return (
-                        <SelectGroup key={root.id}>
-                          <SelectLabel>{root.name}</SelectLabel>
-                          {children.map(child => (
-                            <SelectItem key={child.id} value={child.id.toString()}>
-                              {child.name}
-                            </SelectItem>
-                          ))}
-                        </SelectGroup>
-                      );
-                    }
-                    return <SelectItem key={root.id} value={root.id.toString()}>{root.name}</SelectItem>;
+                    const kids = childrenOf(root.id);
+                    return kids.length ? (
+                      <SelectGroup key={root.id}>
+                        <SelectLabel>{root.name}</SelectLabel>
+                        <SelectItem value={String(root.id)}>{root.name} (general)</SelectItem>
+                        {kids.map(child => <SelectItem key={child.id} value={String(child.id)} className="pl-5">{child.name}</SelectItem>)}
+                      </SelectGroup>
+                    ) : (
+                      <SelectItem key={root.id} value={String(root.id)}>{root.name}</SelectItem>
+                    );
                   })}
                 </SelectContent>
               </Select>
             </div>
 
-            {/* Account */}
-            <div>
-              <Label>{form.type === 'transfer' ? 'From Account' : 'Account'}</Label>
-              <Select value={form.accountId} onValueChange={(v) => setForm(f => ({ ...f, accountId: v || '' }))}>
-                <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
-                <SelectContent>
-                  {allAccounts.map(a => <SelectItem key={a.id} value={a.id.toString()}>{a.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* To Account (transfer only) */}
-            {form.type === 'transfer' && (
-              <div>
-                <Label>To Account</Label>
-                <Select value={form.toAccountId} onValueChange={(v) => setForm(f => ({ ...f, toAccountId: v || '' }))}>
-                  <SelectTrigger><SelectValue placeholder="Select destination" /></SelectTrigger>
+            <div className={cn('grid gap-4', form.type === 'transfer' && 'sm:grid-cols-2')}>
+              <div className="space-y-2">
+                <Label>{form.type === 'transfer' ? 'From account' : 'Account'}</Label>
+                <Select items={accountItems} value={form.accountId || null} onValueChange={(v) => setForm(f => ({ ...f, accountId: (v as string) || '' }))}>
+                  <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
                   <SelectContent>
-                    {allAccounts.filter(a => a.id.toString() !== form.accountId).map(a => (
-                      <SelectItem key={a.id} value={a.id.toString()}>{a.name}</SelectItem>
-                    ))}
+                    {accounts.map(a => <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
-            )}
-
-            {/* Date */}
-            <div>
-              <Label>Date</Label>
-              <Input
-                type="date"
-                value={form.date}
-                onChange={(e) => setForm(f => ({ ...f, date: e.target.value }))}
-              />
+              {form.type === 'transfer' && (
+                <div className="space-y-2">
+                  <Label>To account</Label>
+                  <Select items={accountItems} value={form.toAccountId || null} onValueChange={(v) => setForm(f => ({ ...f, toAccountId: (v as string) || '' }))}>
+                    <SelectTrigger><SelectValue placeholder="Select account" /></SelectTrigger>
+                    <SelectContent>
+                      {accounts.filter(a => String(a.id) !== form.accountId).map(a => (
+                        <SelectItem key={a.id} value={String(a.id)}>{a.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
             </div>
 
-            {/* Description */}
-            <div>
-              <Label>Description (optional)</Label>
-              <Textarea
-                placeholder="What was this for?"
-                value={form.description}
-                onChange={(e) => setForm(f => ({ ...f, description: e.target.value }))}
-                rows={2}
-              />
+            <div className="space-y-2">
+              <Label htmlFor="txn-date">Date</Label>
+              <Input id="txn-date" type="date" value={form.date} onChange={(e) => setForm(f => ({ ...f, date: e.target.value }))} required />
             </div>
 
-            <Button onClick={handleSave} disabled={saving} className="w-full">
-              {saving ? 'Saving...' : editingId ? 'Update' : 'Add Transaction'}
-            </Button>
-          </div>
+            <div className="space-y-2">
+              <Label htmlFor="txn-desc">Description <span className="font-normal text-muted-foreground">(optional)</span></Label>
+              <Textarea id="txn-desc" placeholder="What was this for?" value={form.description} onChange={(e) => setForm(f => ({ ...f, description: e.target.value }))} rows={2} />
+            </div>
+
+            {formError && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{formError}</p>}
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>Cancel</Button>
+              <Button type="submit" disabled={saving}>
+                {saving && <Loader2 className="animate-spin" />}
+                {editingId ? 'Save changes' : 'Add transaction'}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
-    </div>
+
+      <ConfirmDialog
+        open={!!deleting}
+        onOpenChange={(o) => !o && setDeleting(null)}
+        title="Delete this transaction?"
+        description={deleting && (
+          <>
+            {deleting.description || deleting.categoryName} · {formatCurrency(deleting.amount)} on {formatDate(deleting.date)}. The account balance will be adjusted.
+          </>
+        )}
+        onConfirm={async () => {
+          await apiFetch(`/api/transactions/${deleting!.id}`, { method: 'DELETE' });
+          list.reload();
+        }}
+      />
+    </>
   );
 }

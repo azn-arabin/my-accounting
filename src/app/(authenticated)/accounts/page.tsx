@@ -1,58 +1,31 @@
-"use client";
+'use client';
 
-import { useEffect, useState } from "react";
-import { formatCurrency, toPaisa } from "@/lib/formatters";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
-  Wallet,
-  Landmark,
-  Smartphone,
-  CreditCard,
-  CircleDot,
-  MoreVertical,
-  Plus,
-  Pencil,
-  Trash2,
-  Loader2
-} from "lucide-react";
+import { useState } from 'react';
+import { Wallet, Landmark, Smartphone, CreditCard, CircleDot, MoreHorizontal, Plus, Pencil, Trash2, Loader2, Check } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { PageHeader, Refreshable, ErrorBanner } from '@/components/page-header';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { formatCurrency } from '@/lib/formatters';
+import { apiFetch, useApi } from '@/lib/use-api';
+import { cn } from '@/lib/utils';
 
-type AccountType = "cash" | "bank" | "mobile_banking" | "credit_card" | "other";
+type AccountType = 'cash' | 'bank' | 'mobile_banking' | 'credit_card' | 'other';
 
 interface Account {
-  id: string;
+  id: number;
   name: string;
   type: AccountType;
   balance: number;
   currency: string;
-  icon: string | null;
   color: string | null;
-  isActive: boolean;
 }
 
-const typeIcons: Record<AccountType, React.ElementType> = {
+const typeIcons: Record<AccountType, typeof Wallet> = {
   cash: Wallet,
   bank: Landmark,
   mobile_banking: Smartphone,
@@ -60,282 +33,213 @@ const typeIcons: Record<AccountType, React.ElementType> = {
   other: CircleDot,
 };
 
-const typeLabels: Record<AccountType, string> = {
-  cash: "Cash",
-  bank: "Bank",
-  mobile_banking: "Mobile Banking",
-  credit_card: "Credit Card",
-  other: "Other",
+const TYPE_LABELS: Record<AccountType, string> = {
+  cash: 'Cash',
+  bank: 'Bank',
+  mobile_banking: 'Mobile banking',
+  credit_card: 'Credit card',
+  other: 'Other',
 };
 
+const SWATCHES = ['#005bea', '#8b5cf6', '#ec4899', '#f97316', '#10b981', '#0d9488', '#eab308', '#64748b'];
+
+const emptyForm = { name: '', type: 'cash' as AccountType, balance: '', color: SWATCHES[0] };
+
 export default function AccountsPage() {
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const { data, error, loading, refreshing, reload } = useApi<{ accounts: Account[] }>('/api/accounts');
+  const accounts = data?.accounts ?? [];
+  const total = accounts.reduce((s, a) => s + a.balance, 0);
 
-  const [formData, setFormData] = useState({
-    name: "",
-    type: "cash" as AccountType,
-    balance: "",
-    icon: "",
-    color: "",
-  });
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<Account | null>(null);
+  const [form, setForm] = useState(emptyForm);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [deleting, setDeleting] = useState<Account | null>(null);
 
-  const fetchAccounts = async () => {
-    try {
-      setLoading(true);
-      const res = await fetch("/api/accounts");
-      const data = await res.json();
-      if (data.accounts) {
-        setAccounts(data.accounts);
-      }
-    } catch (error) {
-      console.error("Failed to fetch accounts:", error);
-    } finally {
-      setLoading(false);
-    }
+  const openAdd = () => {
+    setEditing(null);
+    setForm(emptyForm);
+    setFormError('');
+    setDialogOpen(true);
   };
 
-  useEffect(() => {
-    fetchAccounts();
-  }, []);
-
-  const handleOpenAdd = () => {
-    setEditingAccount(null);
-    setFormData({ name: "", type: "cash", balance: "", icon: "", color: "" });
-    setIsDialogOpen(true);
-  };
-
-  const handleOpenEdit = (account: Account) => {
-    setEditingAccount(account);
-    setFormData({
-      name: account.name,
-      type: account.type,
-      balance: "", 
-      icon: account.icon || "",
-      color: account.color || "",
-    });
-    setIsDialogOpen(true);
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this account?")) return;
-    try {
-      await fetch(`/api/accounts/${id}`, {
-        method: "DELETE",
-      });
-      fetchAccounts();
-    } catch (error) {
-      console.error("Failed to delete account:", error);
-    }
+  const openEdit = (a: Account) => {
+    setEditing(a);
+    setForm({ name: a.name, type: a.type, balance: '', color: a.color || SWATCHES[0] });
+    setFormError('');
+    setDialogOpen(true);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitting(true);
+    setSaving(true);
+    setFormError('');
     try {
-      if (editingAccount) {
-        await fetch(`/api/accounts/${editingAccount.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: formData.name,
-            type: formData.type,
-            icon: formData.icon,
-            color: formData.color,
-          }),
-        });
-      } else {
-        await fetch("/api/accounts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: formData.name,
-            type: formData.type,
-            balance: formData.balance ? Number(formData.balance) : 0,
-            icon: formData.icon,
-            color: formData.color,
-          }),
-        });
-      }
-      setIsDialogOpen(false);
-      fetchAccounts();
-    } catch (error) {
-      console.error("Failed to save account:", error);
+      await apiFetch(editing ? `/api/accounts/${editing.id}` : '/api/accounts', {
+        method: editing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          editing
+            ? { name: form.name, type: form.type, color: form.color }
+            : { name: form.name, type: form.type, color: form.color, balance: form.balance ? Number(form.balance) : 0 },
+        ),
+      });
+      setDialogOpen(false);
+      reload();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Could not save');
     } finally {
-      setIsSubmitting(false);
+      setSaving(false);
     }
   };
 
-  const totalBalance = accounts.reduce((acc, account) => acc + account.balance, 0);
-
-  if (loading) {
-    return (
-      <div className="flex h-full items-center justify-center p-8">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
   return (
-    <div className="container mx-auto p-4 md:p-6 max-w-5xl space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Accounts</h1>
-          <p className="text-muted-foreground">Manage your wallets and bank accounts.</p>
-        </div>
-        
-        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-          <DialogTrigger>
-            <Button className="w-full sm:w-auto mt-4 sm:mt-0">
-              <Plus className="mr-2 h-4 w-4" /> Add Account
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-[425px]">
-            <DialogHeader>
-              <DialogTitle>{editingAccount ? "Edit Account" : "Add Account"}</DialogTitle>
-            </DialogHeader>
-            <form onSubmit={handleSubmit} className="space-y-4 pt-4">
-              <div className="space-y-2">
-                <Label htmlFor="name">Account Name</Label>
-                <Input
-                  id="name"
-                  placeholder="e.g. Brac Bank"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  required
-                />
-              </div>
-              
-              <div className="space-y-2">
-                <Label htmlFor="type">Account Type</Label>
-                <Select
-                  value={formData.type}
-                  onValueChange={(value) => setFormData({ ...formData, type: (value as any) || 'cash' })}
-                >
-                  <SelectTrigger id="type">
-                    <SelectValue placeholder="Select type" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.entries(typeLabels).map(([val, label]) => (
-                      <SelectItem key={val} value={val}>
-                        {label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+    <>
+      <PageHeader
+        title="Accounts"
+        description="Your bank, mobile wallets and cash"
+        actions={<Button onClick={openAdd}><Plus /> Add account</Button>}
+      />
 
-              {!editingAccount && (
-                <div className="space-y-2">
-                  <Label htmlFor="balance">Initial Balance</Label>
-                  <Input
-                    id="balance"
-                    type="number"
-                    step="0.01"
-                    placeholder="0.00"
-                    value={formData.balance}
-                    onChange={(e) => setFormData({ ...formData, balance: e.target.value })}
-                  />
-                </div>
-              )}
+      {error && <ErrorBanner message={error} onRetry={reload} />}
 
-              <div className="space-y-2">
-                <Label htmlFor="color">Color (Hex)</Label>
-                <Input
-                  id="color"
-                  placeholder="#000000"
-                  value={formData.color}
-                  onChange={(e) => setFormData({ ...formData, color: e.target.value })}
-                />
-              </div>
-
-              <Button type="submit" className="w-full" disabled={isSubmitting}>
-                {isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                {editingAccount ? "Save Changes" : "Create Account"}
-              </Button>
-            </form>
-          </DialogContent>
-        </Dialog>
-      </div>
-
-      <Card className="bg-primary/5 border-primary/10">
-        <CardContent className="p-6">
-          <div className="flex flex-col gap-1">
-            <span className="text-sm font-medium text-muted-foreground">Total Balance</span>
-            <span className="text-3xl font-bold tracking-tight">
-              {formatCurrency(totalBalance)}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-
-      {accounts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center p-12 text-center border rounded-lg border-dashed bg-muted/20">
-          <Wallet className="h-12 w-12 text-muted-foreground mb-4" />
-          <h3 className="text-lg font-semibold">No accounts found</h3>
-          <p className="text-sm text-muted-foreground mt-1 mb-4">
-            You haven't added any accounts yet. Create one to start tracking your finances.
-          </p>
-          <Button variant="outline" onClick={handleOpenAdd}>
-            <Plus className="mr-2 h-4 w-4" />
-            Add Account
-          </Button>
+      {loading ? (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 6 }, (_, i) => <div key={i} className="h-32 animate-pulse rounded-xl border bg-muted/40" />)}
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {accounts.map((account) => {
-            const Icon = typeIcons[account.type] || Wallet;
-            
-            return (
-              <Card key={account.id}>
-                <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
-                  <div className="flex items-center gap-3">
-                    <div 
-                      className="p-2 rounded-md bg-primary/10"
-                      style={account.color ? { backgroundColor: `${account.color}20`, color: account.color } : {}}
-                    >
-                      <Icon className="h-5 w-5" />
+        <Refreshable refreshing={refreshing} className="space-y-6">
+          <div className="rounded-xl border bg-gradient-to-br from-primary/10 via-card to-card p-6 shadow-xs">
+            <p className="text-sm font-medium text-muted-foreground">Total balance</p>
+            <p className="mt-1 text-3xl font-semibold tracking-tight">{formatCurrency(total)}</p>
+            <p className="mt-1 text-xs text-muted-foreground">Across {accounts.length} account{accounts.length === 1 ? '' : 's'}</p>
+          </div>
+
+          {accounts.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed p-12 text-center">
+              <Wallet className="h-10 w-10 text-muted-foreground" />
+              <div>
+                <p className="font-medium">No accounts yet</p>
+                <p className="text-sm text-muted-foreground">Create one to start tracking your money.</p>
+              </div>
+              <Button onClick={openAdd}><Plus /> Add account</Button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {accounts.map((a) => {
+                const Icon = typeIcons[a.type] || Wallet;
+                const color = a.color || 'var(--muted-foreground)';
+                return (
+                  <div key={a.id} className="group relative overflow-hidden rounded-xl border bg-card p-5 shadow-xs transition-shadow hover:shadow-md">
+                    <div aria-hidden className="absolute inset-x-0 top-0 h-1" style={{ backgroundColor: color }} />
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <span
+                          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
+                          style={{ backgroundColor: `color-mix(in oklch, ${color} 14%, transparent)`, color }}
+                        >
+                          <Icon className="h-5 w-5" />
+                        </span>
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{a.name}</p>
+                          <p className="text-xs text-muted-foreground">{TYPE_LABELS[a.type]}</p>
+                        </div>
+                      </div>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Actions" className="opacity-60 group-hover:opacity-100 data-popup-open:opacity-100" />}>
+                          <MoreHorizontal />
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => openEdit(a)}><Pencil /> Edit</DropdownMenuItem>
+                          <DropdownMenuItem variant="destructive" onClick={() => setDeleting(a)}><Trash2 /> Delete</DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
-                    <div>
-                      <CardTitle className="text-base">{account.name}</CardTitle>
-                      <CardDescription className="text-xs">{typeLabels[account.type]}</CardDescription>
-                    </div>
+                    <p className={cn('tabular mt-5 text-2xl font-semibold tracking-tight', a.balance < 0 && 'text-destructive')}>
+                      {formatCurrency(a.balance)}
+                    </p>
                   </div>
-                  
-                  <DropdownMenu>
-                    <DropdownMenuTrigger>
-                      <Button variant="ghost" size="icon" className="h-8 w-8">
-                        <MoreVertical className="h-4 w-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={() => handleOpenEdit(account)}>
-                        <Pencil className="mr-2 h-4 w-4" />
-                        Edit
-                      </DropdownMenuItem>
-                      <DropdownMenuItem 
-                        onClick={() => handleDelete(account.id)}
-                        className="text-destructive focus:text-destructive"
-                      >
-                        <Trash2 className="mr-2 h-4 w-4" />
-                        Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </CardHeader>
-                <CardContent>
-                  <div className="mt-2 text-2xl font-semibold">
-                    {formatCurrency(account.balance)}
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
+                );
+              })}
+            </div>
+          )}
+        </Refreshable>
       )}
-    </div>
+
+      <Dialog open={dialogOpen} onOpenChange={(o) => { if (!saving) setDialogOpen(o); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editing ? 'Edit account' : 'Add account'}</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="acc-name">Name</Label>
+              <Input id="acc-name" placeholder="e.g. BRAC Bank" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required autoFocus />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Type</Label>
+              <Select items={TYPE_LABELS} value={form.type} onValueChange={(v) => setForm({ ...form, type: (v as AccountType) || 'cash' })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(TYPE_LABELS) as AccountType[]).map((t) => {
+                    const Icon = typeIcons[t];
+                    return <SelectItem key={t} value={t}><Icon className="text-muted-foreground" /> {TYPE_LABELS[t]}</SelectItem>;
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {!editing && (
+              <div className="space-y-2">
+                <Label htmlFor="acc-balance">Opening balance (৳)</Label>
+                <Input id="acc-balance" type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={form.balance} onChange={(e) => setForm({ ...form, balance: e.target.value })} />
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label>Color</Label>
+              <div className="flex flex-wrap gap-2">
+                {SWATCHES.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => setForm({ ...form, color: c })}
+                    className="flex h-8 w-8 items-center justify-center rounded-full ring-offset-2 ring-offset-background transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                    style={{ backgroundColor: c }}
+                    aria-label={`Color ${c}`}
+                    aria-pressed={form.color === c}
+                  >
+                    {form.color === c && <Check className="h-4 w-4 text-white" />}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {formError && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{formError}</p>}
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>Cancel</Button>
+              <Button type="submit" disabled={saving}>
+                {saving && <Loader2 className="animate-spin" />}
+                {editing ? 'Save changes' : 'Create account'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={!!deleting}
+        onOpenChange={(o) => !o && setDeleting(null)}
+        title={`Delete ${deleting?.name ?? 'account'}?`}
+        description="The account is hidden from lists; its past transactions are kept."
+        onConfirm={async () => {
+          await apiFetch(`/api/accounts/${deleting!.id}`, { method: 'DELETE' });
+          reload();
+        }}
+      />
+    </>
   );
 }

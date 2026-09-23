@@ -16,8 +16,8 @@ export default async function AuthenticatedLayout({ children }: { children: Reac
         <AppSidebar />
         <div className="flex flex-1 flex-col overflow-hidden">
           <AppHeader />
-          <main className="flex-1 overflow-y-auto p-6">
-            {children}
+          <main className="flex-1 overflow-y-auto">
+            <div className="animate-page-in mx-auto w-full max-w-7xl space-y-6 p-4 md:p-6">{children}</div>
           </main>
         </div>
       </div>

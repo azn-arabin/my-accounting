@@ -1,6 +1,9 @@
 import { SignJWT, jwtVerify } from 'jose';
 import { hash, compare } from 'bcryptjs';
 import { cookies } from 'next/headers';
+import { eq } from 'drizzle-orm';
+import { db } from '@/db';
+import { users } from '@/db/schema';
 
 const SESSION_COOKIE = 'ka-session';
 const secret = new TextEncoder().encode(process.env.AUTH_SECRET || 'fallback-secret-change-me');
@@ -37,7 +40,11 @@ export async function getSession(): Promise<{ userId: number } | null> {
 
   try {
     const { payload } = await jwtVerify(token, secret);
-    return { userId: payload.userId as number };
+    const userId = payload.userId as number;
+    // A valid signature isn't enough: the user may have been deleted/re-created
+    // (e.g. after a DB reset), leaving a cookie that points at a stale id.
+    const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
+    return user ? { userId } : null;
   } catch {
     return null;
   }

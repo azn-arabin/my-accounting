@@ -1,258 +1,185 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
-import { Card } from '@/components/ui/card';
-import { Skeleton } from '@/components/ui/skeleton';
+import { useState } from 'react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { SummaryCards } from '@/components/charts/summary-cards';
+import { SummaryCards, SummaryCardsSkeleton } from '@/components/charts/summary-cards';
 import { CategoryPieChart } from '@/components/charts/pie-chart';
 import { MonthlyBarChart } from '@/components/charts/bar-chart';
-import { formatCurrency, formatDate, getTypeBadgeVariant } from '@/lib/formatters';
-import { format, subMonths } from 'date-fns';
+import { DailyTrendChart } from '@/components/charts/area-chart';
+import { ChartCard } from '@/components/charts/chart-parts';
+import { PageHeader, Refreshable, ErrorBanner } from '@/components/page-header';
+import { MonthPicker, currentMonth, monthLabel } from '@/components/month-picker';
+import { TxnAmount, TxnTypeIcon, HistoricalBadge, type TxnType } from '@/components/txn-bits';
+import { formatCurrency, formatDate } from '@/lib/formatters';
+import { useHistoricalMode } from '@/lib/use-historical-mode';
+import { useApi } from '@/lib/use-api';
 
 interface DashboardData {
-  summary: {
-    totalIncome: number;
-    totalExpense: number;
-    netBalance: number;
-    totalAccountsBalance: number;
-  };
+  summary: { totalIncome: number; totalExpense: number; netBalance: number; totalAccountsBalance: number };
   dailyTrend: Array<{ date: string; income: number; expense: number }>;
   categoryBreakdown: Array<{ name: string; amount: number; color: string | null }>;
   monthlyComparison: Array<{ month: string; income: number; expense: number }>;
-  recentTransactions: Array<{
-    id: number;
-    amount: number;
-    type: string;
-    description: string | null;
-    date: string;
-    categoryName: string | null;
-    accountName: string | null;
-  }>;
 }
 
 interface Transaction {
   id: number;
   amount: number;
-  type: 'income' | 'expense' | 'transfer';
+  type: TxnType;
   description: string | null;
   date: string;
   categoryName: string | null;
-  categoryColor: string | null;
   accountName: string | null;
+  isHistorical: boolean;
 }
 
 export default function ReportsPage() {
-  const [selectedMonth, setSelectedMonth] = useState(format(new Date(), 'yyyy-MM'));
-  const [dashData, setDashData] = useState<DashboardData | null>(null);
-  const [monthTxns, setMonthTxns] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [month, setMonth] = useState(currentMonth);
+  const { mode } = useHistoricalMode();
+  const period = monthLabel(month);
+  const dash = useApi<DashboardData>(`/api/dashboard?month=${month}&historical=${mode}`);
+  const txns = useApi<{ transactions: Transaction[] }>(
+    `/api/transactions?startDate=${month}-01&endDate=${month}-31&limit=500&historical=${mode}`,
+  );
+  const data = dash.data;
+  const monthTxns = txns.data?.transactions ?? [];
 
-  // Generate last 12 months for selector
-  const months = [];
-  for (let i = 0; i < 12; i++) {
-    const d = subMonths(new Date(), i);
-    months.push({ value: format(d, 'yyyy-MM'), label: format(d, 'MMMM yyyy') });
-  }
-
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    const [dashRes, txnRes] = await Promise.all([
-      fetch(`/api/dashboard?month=${selectedMonth}`),
-      fetch(`/api/transactions?startDate=${selectedMonth}-01&endDate=${selectedMonth}-31&limit=200`),
-    ]);
-    const dash = await dashRes.json();
-    const txn = await txnRes.json();
-    setDashData(dash);
-    setMonthTxns(txn.transactions || []);
-    setLoading(false);
-  }, [selectedMonth]);
-
-  useEffect(() => { fetchData(); }, [fetchData]);
-
-  if (loading) {
-    return (
-      <div className="space-y-6">
-        <h1 className="text-3xl font-bold tracking-tight">Reports</h1>
-        <Skeleton className="h-10 w-48" />
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-28 rounded-xl" />)}
-        </div>
-        <Skeleton className="h-80 rounded-xl" />
-      </div>
-    );
-  }
-
-  if (!dashData) return <p>Failed to load reports</p>;
-
-  // Group transactions by date
   const txnsByDate: Record<string, Transaction[]> = {};
-  monthTxns.forEach(txn => {
-    if (!txnsByDate[txn.date]) txnsByDate[txn.date] = [];
-    txnsByDate[txn.date].push(txn);
-  });
+  for (const t of monthTxns) (txnsByDate[t.date] ??= []).push(t);
   const sortedDates = Object.keys(txnsByDate).sort((a, b) => b.localeCompare(a));
+  const totalExpense = data?.categoryBreakdown.reduce((s, c) => s + c.amount, 0) ?? 0;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold tracking-tight">Reports</h1>
-        <Select value={selectedMonth} onValueChange={(v) => setSelectedMonth(v || '')}>
-          <SelectTrigger className="w-48">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {months.map(m => (
-              <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+    <>
+      <PageHeader title="Reports" description={`Detailed numbers for ${period}`} actions={<MonthPicker value={month} onChange={setMonth} />} />
 
-      <Tabs defaultValue="summary">
-        <TabsList>
-          <TabsTrigger value="summary">Monthly Summary</TabsTrigger>
-          <TabsTrigger value="breakdown">Category Breakdown</TabsTrigger>
-          <TabsTrigger value="trends">Trends</TabsTrigger>
-        </TabsList>
+      {(dash.error || txns.error) && <ErrorBanner message={dash.error || txns.error!} onRetry={() => { dash.reload(); txns.reload(); }} />}
 
-        {/* Monthly Summary Tab */}
-        <TabsContent value="summary" className="space-y-6">
-          <SummaryCards {...dashData.summary} />
+      {dash.loading || !data ? (
+        <SummaryCardsSkeleton />
+      ) : (
+        <Refreshable refreshing={dash.refreshing || txns.refreshing}>
+          <Tabs defaultValue="summary" className="gap-6">
+            <TabsList>
+              <TabsTrigger value="summary">Summary</TabsTrigger>
+              <TabsTrigger value="breakdown">Categories</TabsTrigger>
+              <TabsTrigger value="trends">Trends</TabsTrigger>
+            </TabsList>
 
-          <Card className="p-6">
-            <h3 className="text-lg font-semibold mb-4">Transactions by Day</h3>
-            {sortedDates.length === 0 ? (
-              <p className="text-center text-muted-foreground py-8">No transactions this month</p>
-            ) : (
-              <div className="space-y-6">
-                {sortedDates.map(date => {
-                  const dayTxns = txnsByDate[date];
-                  const dayTotal = dayTxns.reduce((sum, t) => {
-                    if (t.type === 'income') return sum + t.amount;
-                    if (t.type === 'expense') return sum - t.amount;
-                    return sum;
-                  }, 0);
+            <TabsContent value="summary" className="space-y-6">
+              <SummaryCards {...data.summary} periodLabel={period} />
 
-                  return (
-                    <div key={date}>
-                      <div className="flex items-center justify-between mb-2">
-                        <h4 className="font-medium text-sm">{formatDate(date)}</h4>
-                        <span className={`text-sm font-semibold ${dayTotal >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                          {dayTotal >= 0 ? '+' : ''}{formatCurrency(Math.abs(dayTotal))}
-                        </span>
-                      </div>
-                      <div className="space-y-1">
-                        {dayTxns.map(txn => (
-                          <div key={txn.id} className="flex items-center justify-between rounded-lg border p-3">
-                            <div>
-                              <p className="text-sm font-medium">{txn.description || txn.categoryName || 'Transaction'}</p>
-                              <p className="text-xs text-muted-foreground">{txn.categoryName} · {txn.accountName}</p>
-                            </div>
-                            <div className="text-right">
-                              <p className={`text-sm font-semibold ${
-                                txn.type === 'income' ? 'text-green-600 dark:text-green-400' :
-                                txn.type === 'expense' ? 'text-red-600 dark:text-red-400' :
-                                'text-blue-600 dark:text-blue-400'
-                              }`}>
-                                {txn.type === 'income' ? '+' : txn.type === 'expense' ? '-' : '↔'}
-                                {formatCurrency(txn.amount)}
-                              </p>
-                              <span className={`text-xs px-2 py-0.5 rounded-full ${getTypeBadgeVariant(txn.type)}`}>
-                                {txn.type}
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                <DailyTrendChart data={data.dailyTrend} subtitle={period} />
+
+                <ChartCard title="Transactions by day" subtitle={`${monthTxns.length} transactions`}>
+                  <div className="-mr-2 max-h-[300px] space-y-5 overflow-y-auto pr-2">
+                    {sortedDates.length === 0 ? (
+                      <p className="py-8 text-center text-sm text-muted-foreground">No transactions this month</p>
+                    ) : (
+                      sortedDates.map((date) => {
+                        const dayTxns = txnsByDate[date];
+                        const dayNet = dayTxns.reduce((sum, t) => sum + (t.type === 'income' ? t.amount : t.type === 'expense' ? -t.amount : 0), 0);
+                        return (
+                          <div key={date}>
+                            <div className="sticky top-0 z-10 mb-1 flex items-center justify-between bg-card py-1 text-xs">
+                              <span className="font-medium text-muted-foreground">{formatDate(date)}</span>
+                              <span className={`tabular font-medium ${dayNet >= 0 ? 'text-success' : 'text-foreground'}`}>
+                                {dayNet > 0 ? '+' : dayNet < 0 ? '−' : ''}{formatCurrency(Math.abs(dayNet))}
                               </span>
                             </div>
+                            <ul className="divide-y">
+                              {dayTxns.map((txn) => (
+                                <li key={txn.id} className="flex items-center justify-between gap-3 py-2">
+                                  <div className="flex min-w-0 items-center gap-2.5">
+                                    <TxnTypeIcon type={txn.type} className="h-7 w-7" />
+                                    <div className="min-w-0">
+                                      <p className="flex items-center gap-2 text-sm">
+                                        <span className="truncate">{txn.description || txn.categoryName || 'Transaction'}</span>
+                                        {txn.isHistorical && <HistoricalBadge />}
+                                      </p>
+                                      <p className="truncate text-xs text-muted-foreground">{txn.categoryName} · {txn.accountName}</p>
+                                    </div>
+                                  </div>
+                                  <TxnAmount type={txn.type} amount={txn.amount} className="text-sm" />
+                                </li>
+                              ))}
+                            </ul>
                           </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
+                        );
+                      })
+                    )}
+                  </div>
+                </ChartCard>
               </div>
-            )}
-          </Card>
-        </TabsContent>
+            </TabsContent>
 
-        {/* Category Breakdown Tab */}
-        <TabsContent value="breakdown" className="space-y-6">
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <CategoryPieChart data={dashData.categoryBreakdown} />
-            <Card className="p-6">
-              <h3 className="text-lg font-semibold mb-4">Category Details</h3>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Category</TableHead>
-                    <TableHead className="text-right">Amount</TableHead>
-                    <TableHead className="text-right">% of Total</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {dashData.categoryBreakdown.map((cat, i) => {
-                    const totalExp = dashData.categoryBreakdown.reduce((s, c) => s + c.amount, 0);
-                    const pct = totalExp > 0 ? ((cat.amount / totalExp) * 100).toFixed(1) : '0';
-                    return (
-                      <TableRow key={i}>
-                        <TableCell>
-                          <div className="flex items-center gap-2">
-                            <div className="h-3 w-3 rounded-full" style={{ backgroundColor: cat.color || '#6b7280' }} />
-                            {cat.name}
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-right font-medium">{formatCurrency(cat.amount)}</TableCell>
-                        <TableCell className="text-right text-muted-foreground">{pct}%</TableCell>
+            <TabsContent value="breakdown">
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                <CategoryPieChart data={data.categoryBreakdown} subtitle={period} limit={10} />
+                <ChartCard title="Category details" subtitle={`Total expense ${formatCurrency(totalExpense)}`}>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Category</TableHead>
+                        <TableHead className="text-right">Amount</TableHead>
+                        <TableHead className="text-right">Share</TableHead>
                       </TableRow>
-                    );
-                  })}
-                  {dashData.categoryBreakdown.length === 0 && (
+                    </TableHeader>
+                    <TableBody>
+                      {data.categoryBreakdown.map((cat) => (
+                        <TableRow key={cat.name}>
+                          <TableCell>{cat.name}</TableCell>
+                          <TableCell className="tabular text-right font-medium">{formatCurrency(cat.amount)}</TableCell>
+                          <TableCell className="tabular text-right text-muted-foreground">
+                            {totalExpense > 0 ? ((cat.amount / totalExpense) * 100).toFixed(1) : '0.0'}%
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                      {data.categoryBreakdown.length === 0 && (
+                        <TableRow>
+                          <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">No expenses this month</TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </ChartCard>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="trends" className="space-y-6">
+              <MonthlyBarChart data={data.monthlyComparison} subtitle={`6 months to ${period}`} />
+              <ChartCard title="Month over month">
+                <Table>
+                  <TableHeader>
                     <TableRow>
-                      <TableCell colSpan={3} className="text-center text-muted-foreground py-8">
-                        No expenses this month
-                      </TableCell>
+                      <TableHead>Month</TableHead>
+                      <TableHead className="text-right">Income</TableHead>
+                      <TableHead className="text-right">Expense</TableHead>
+                      <TableHead className="text-right">Net</TableHead>
                     </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </Card>
-          </div>
-        </TabsContent>
-
-        {/* Trends Tab */}
-        <TabsContent value="trends" className="space-y-6">
-          <MonthlyBarChart data={dashData.monthlyComparison} />
-
-          <Card className="p-6">
-            <h3 className="text-lg font-semibold mb-4">Month-over-Month</h3>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Month</TableHead>
-                  <TableHead className="text-right">Income</TableHead>
-                  <TableHead className="text-right">Expense</TableHead>
-                  <TableHead className="text-right">Net</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {dashData.monthlyComparison.map((m, i) => {
-                  const net = m.income - m.expense;
-                  return (
-                    <TableRow key={i}>
-                      <TableCell className="font-medium">{m.month}</TableCell>
-                      <TableCell className="text-right text-green-600 dark:text-green-400">{formatCurrency(m.income)}</TableCell>
-                      <TableCell className="text-right text-red-600 dark:text-red-400">{formatCurrency(m.expense)}</TableCell>
-                      <TableCell className={`text-right font-semibold ${net >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                        {net >= 0 ? '+' : ''}{formatCurrency(Math.abs(net))}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </Card>
-        </TabsContent>
-      </Tabs>
-    </div>
+                  </TableHeader>
+                  <TableBody>
+                    {data.monthlyComparison.map((m) => {
+                      const net = m.income - m.expense;
+                      return (
+                        <TableRow key={m.month}>
+                          <TableCell className="font-medium">{m.month}</TableCell>
+                          <TableCell className="tabular text-right">{formatCurrency(m.income)}</TableCell>
+                          <TableCell className="tabular text-right">{formatCurrency(m.expense)}</TableCell>
+                          <TableCell className={`tabular text-right font-semibold ${net >= 0 ? 'text-success' : 'text-destructive'}`}>
+                            {net > 0 ? '+' : net < 0 ? '−' : ''}{formatCurrency(Math.abs(net))}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </ChartCard>
+            </TabsContent>
+          </Tabs>
+        </Refreshable>
+      )}
+    </>
   );
 }
