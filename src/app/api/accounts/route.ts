@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { accounts } from "@/db/schema";
+import { accounts, ACCOUNT_ROLES, type AccountRole } from "@/db/schema";
 import { eq, and, asc } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 
@@ -34,10 +34,13 @@ export async function POST(request: NextRequest) {
 
     const userId = session.userId;
     const body = await request.json();
-    const { name, type, balance, currency, icon, color } = body;
+    const { name, type, balance, currency, icon, color, role, showOnDashboard } = body;
 
     if (!name || !type) {
       return NextResponse.json({ error: "Name and type are required" }, { status: 400 });
+    }
+    if (role !== undefined && !ACCOUNT_ROLES.includes(role)) {
+      return NextResponse.json({ error: "Invalid account role" }, { status: 400 });
     }
 
     // Convert regular number (taka) to paisa (*100)
@@ -52,6 +55,8 @@ export async function POST(request: NextRequest) {
         currency: currency || "BDT",
         icon,
         color,
+        role: (role as AccountRole) ?? "own",
+        showOnDashboard: showOnDashboard ?? true,
         userId: session.userId,
       })
       .returning();

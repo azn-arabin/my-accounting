@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { ChevronDown, CornerDownRight, Pencil, Plus, Trash2, Loader2, Check } from 'lucide-react';
+import { ChevronDown, CornerDownRight, Pencil, Plus, Trash2, Loader2, Check, MoveRight, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -11,6 +11,7 @@ import { PageHeader, Refreshable, ErrorBanner } from '@/components/page-header';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { apiFetch, useApi } from '@/lib/use-api';
 import { cn } from '@/lib/utils';
+import { categoryItems as buildCategoryItems, categoryTree } from '@/lib/categories';
 
 type CategoryType = 'income' | 'expense' | 'transfer';
 
@@ -21,6 +22,7 @@ interface Category {
   parentId: number | null;
   icon: string | null;
   color: string | null;
+  txnCount: number;
 }
 
 interface CategoryNode extends Category {
@@ -41,6 +43,9 @@ export default function CategoriesPage() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const [deleting, setDeleting] = useState<Category | null>(null);
+  const [moving, setMoving] = useState<CategoryNode | null>(null);
+  const [message, setMessage] = useState('');
+  const labels = useMemo(() => buildCategoryItems(categories), [categories]);
 
   const trees = useMemo(() => {
     const map = new Map<number, CategoryNode>(categories.map(c => [c.id, { ...c, children: [] }]));
@@ -109,9 +114,9 @@ export default function CategoriesPage() {
         {child && <CornerDownRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />}
         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: node.color || 'var(--muted-foreground)' }} />
         <span className={cn('truncate text-sm', !child && 'font-medium')}>{node.name}</span>
-        {!child && node.children.length > 0 && (
-          <span className="rounded-full bg-muted px-1.5 text-[11px] text-muted-foreground">{node.children.length}</span>
-        )}
+        <span className="tabular text-xs text-muted-foreground" title="Transactions in this category">
+          {node.txnCount > 0 ? `${node.txnCount} txn${node.txnCount === 1 ? '' : 's'}` : ''}
+        </span>
       </div>
       <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
         {!child && (
@@ -119,6 +124,16 @@ export default function CategoriesPage() {
             <Plus />
           </Button>
         )}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          onClick={() => setMoving(node)}
+          disabled={node.txnCount === 0 && !node.children.some(c => c.txnCount > 0)}
+          aria-label={`Move transactions from ${node.name}`}
+          title="Move its transactions to another category"
+        >
+          <MoveRight />
+        </Button>
         <Button variant="ghost" size="icon-sm" onClick={() => openEdit(node)} aria-label={`Edit ${node.name}`} title="Edit"><Pencil /></Button>
         <Button variant="ghost" size="icon-sm" className="text-destructive hover:text-destructive" onClick={() => setDeleting(node)} aria-label={`Delete ${node.name}`} title="Delete">
           <Trash2 />
@@ -136,6 +151,12 @@ export default function CategoriesPage() {
       />
 
       {error && <ErrorBanner message={error} onRetry={reload} />}
+      {message && (
+        <div role="status" className="flex items-center justify-between gap-3 rounded-lg bg-success/10 px-4 py-2.5 text-sm text-success">
+          {message}
+          <button type="button" onClick={() => setMessage('')} aria-label="Dismiss"><X className="h-4 w-4" /></button>
+        </div>
+      )}
 
       {loading ? (
         <div className="space-y-4">{[0, 1, 2].map(i => <div key={i} className="h-40 animate-pulse rounded-xl border bg-muted/40" />)}</div>
@@ -249,6 +270,16 @@ export default function CategoriesPage() {
         </DialogContent>
       </Dialog>
 
+      {moving && (
+        <MoveDialog
+          source={moving}
+          categories={categories}
+          labels={labels}
+          onClose={() => setMoving(null)}
+          onMoved={(text) => { setMoving(null); setMessage(text); reload(); }}
+        />
+      )}
+
       <ConfirmDialog
         open={!!deleting}
         onOpenChange={(o) => !o && setDeleting(null)}
@@ -260,5 +291,102 @@ export default function CategoriesPage() {
         }}
       />
     </>
+  );
+}
+
+function MoveDialog({ source, categories, labels, onClose, onMoved }: {
+  source: CategoryNode;
+  categories: Category[];
+  labels: Record<string, string>;
+  onClose: () => void;
+  onMoved: (message: string) => void;
+}) {
+  const [targetId, setTargetId] = useState<string | null>(null);
+  const [includeSubs, setIncludeSubs] = useState(source.children.length > 0);
+  const [removeSource, setRemoveSource] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const childCount = source.children.reduce((n, c) => n + c.txnCount, 0);
+  const count = source.txnCount + (includeSubs ? childCount : 0);
+  // Same type only; not the source itself (nor its children when they move along)
+  const tree = categoryTree(categories, source.type)
+    .filter(r => r.id !== source.id)
+    .map(r => ({ ...r, children: r.children.filter(c => c.id !== source.id) }));
+  const ownChildren = includeSubs ? [] : source.children;
+
+  const submit = async () => {
+    if (!targetId) return;
+    setBusy(true);
+    setError('');
+    try {
+      const res = await apiFetch<{ moved: number }>(`/api/categories/${source.id}/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetId: Number(targetId), includeSubcategories: includeSubs, deactivateSource: removeSource }),
+      });
+      onMoved(`Moved ${res.moved} transaction${res.moved === 1 ? '' : 's'} from ${source.name} to ${labels[targetId]}${removeSource ? ` and removed ${source.name}` : ''}.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not move');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !busy) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Move transactions from “{source.name}”</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Only the category changes — amounts, dates and account balances stay exactly the same.
+          </p>
+
+          <div className="space-y-2">
+            <Label>Move to</Label>
+            <Select items={labels} value={targetId} onValueChange={(v) => setTargetId((v as string) || null)}>
+              <SelectTrigger><SelectValue placeholder="Choose a category" /></SelectTrigger>
+              <SelectContent className="max-h-72">
+                {ownChildren.map(c => <SelectItem key={c.id} value={String(c.id)}>{labels[String(c.id)]}</SelectItem>)}
+                {tree.map(root => [
+                  <SelectItem key={root.id} value={String(root.id)}>{root.name}</SelectItem>,
+                  ...root.children.map(ch => <SelectItem key={ch.id} value={String(ch.id)} className="pl-6">{ch.name}</SelectItem>),
+                ])}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {source.children.length > 0 && (
+            <Toggle checked={includeSubs} onChange={setIncludeSubs}>
+              Also move the transactions of its {source.children.length} sub-categor{source.children.length === 1 ? 'y' : 'ies'} ({childCount})
+            </Toggle>
+          )}
+          <Toggle checked={removeSource} onChange={setRemoveSource}>
+            Remove “{source.name}” afterwards{source.children.length > 0 && !includeSubs ? ' (its sub-categories are kept and re-homed)' : ''}
+          </Toggle>
+
+          {error && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={submit} disabled={busy || !targetId}>
+            {busy && <Loader2 className="animate-spin" />}
+            Move {count} transaction{count === 1 ? '' : 's'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function Toggle({ checked, onChange, children }: { checked: boolean; onChange: (v: boolean) => void; children: React.ReactNode }) {
+  return (
+    <button type="button" role="checkbox" aria-checked={checked} onClick={() => onChange(!checked)} className="flex w-full items-start gap-2.5 text-left text-sm">
+      <span className={cn('mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors', checked ? 'border-primary bg-primary text-primary-foreground' : 'border-input')}>
+        {checked && <Check className="h-3 w-3" />}
+      </span>
+      <span>{children}</span>
+    </button>
   );
 }

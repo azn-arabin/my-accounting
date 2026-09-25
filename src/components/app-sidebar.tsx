@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, ArrowRightLeft, Landmark, Tags, BarChart3, LogOut, Wallet, X } from 'lucide-react';
+import { LayoutDashboard, ArrowRightLeft, Landmark, Tags, ChartPie, LogOut, Wallet, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { useSidebar } from '@/components/sidebar-context';
@@ -10,9 +10,9 @@ import { useSidebar } from '@/components/sidebar-context';
 export const navItems = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Transactions', href: '/transactions', icon: ArrowRightLeft },
+  { name: 'Insights', href: '/insights', icon: ChartPie },
   { name: 'Accounts', href: '/accounts', icon: Landmark },
   { name: 'Categories', href: '/categories', icon: Tags },
-  { name: 'Reports', href: '/reports', icon: BarChart3 },
 ];
 
 export function AppSidebar() {

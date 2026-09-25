@@ -4,6 +4,10 @@
  *   npx tsx src/db/migrate-real-data.ts           dry run: writes data/migration-report.md + data/migration-rows.csv
  *   npx tsx src/db/migrate-real-data.ts --apply   WIPES the DB in .env.local and inserts the ledger (one DB transaction)
  *
+ * --apply refuses to run once transactions entered in the app exist (is_historical = false), because the
+ * wipe would delete them; pass --force-wipe as well only if that is really intended.
+ * Saved Insights groups survive (re-linked to the new categories by name).
+ *
  * How it stays correct:
  * - Duplicate SMS (same sender + body) are dropped.
  * - Every wallet SMS carries a running balance (bank: C/B, Rocket/bKash/Nagad: Balance). Each account's
@@ -33,6 +37,7 @@ import * as schema from './schema';
 loadEnvConfig(process.cwd());
 
 const APPLY = process.argv.includes('--apply');
+const FORCE_WIPE = process.argv.includes('--force-wipe');
 const XML_PATH = path.join(process.cwd(), 'data', 'sms-20260921214106.xml');
 const REPORT_PATH = path.join(process.cwd(), 'data', 'migration-report.md');
 const CSV_PATH = path.join(process.cwd(), 'data', 'migration-rows.csv');
@@ -48,7 +53,7 @@ const SALARY_MIN = 18000;
 
 type AccKey = 'bank' | 'rocket' | 'rocket2' | 'bkash' | 'bkash2' | 'nagad' | 'cash' | 'loans' | 'amanat';
 
-const ACCOUNTS: Record<AccKey, { name: string; type: 'bank' | 'mobile_banking' | 'cash' | 'other'; color: string; icon: string }> = {
+const ACCOUNTS: Record<AccKey, { name: string; type: 'bank' | 'mobile_banking' | 'cash' | 'other'; color: string; icon: string; role?: 'own' | 'receivable' | 'held' }> = {
   bank: { name: 'DBBL Bank', type: 'bank', color: '#005bea', icon: 'building-library' },
   rocket: { name: 'DBBL Rocket', type: 'mobile_banking', color: '#8b5cf6', icon: 'device-phone-mobile' },
   rocket2: { name: 'DBBL Rocket (01324190634)', type: 'mobile_banking', color: '#a78bfa', icon: 'device-phone-mobile' },
@@ -56,9 +61,10 @@ const ACCOUNTS: Record<AccKey, { name: string; type: 'bank' | 'mobile_banking' |
   bkash2: { name: 'bKash (01324190634)', type: 'mobile_banking', color: '#f472b6', icon: 'device-phone-mobile' },
   nagad: { name: 'Nagad', type: 'mobile_banking', color: '#f97316', icon: 'device-phone-mobile' },
   cash: { name: 'Cash', type: 'cash', color: '#10b981', icon: 'banknotes' },
-  loans: { name: 'Loans Given', type: 'other', color: '#0d9488', icon: 'hand-coins' },
+  // Money lent out: still mine, but not in hand
+  loans: { name: 'Lucky apu', type: 'other', color: '#0d9488', icon: 'hand-coins', role: 'receivable' },
   // Money kept for someone else: negative balance = owed back, so it never counts as own money
-  amanat: { name: "Ammu's Amanat", type: 'other', color: '#a855f7', icon: 'hand-heart' },
+  amanat: { name: 'Ammu', type: 'other', color: '#a855f7', icon: 'hand-heart', role: 'held' },
 };
 
 type CatType = 'income' | 'expense' | 'transfer';
@@ -73,7 +79,7 @@ const CATEGORIES: Array<{ name: string; type: CatType; color: string; children?:
   { name: 'Family Support', type: 'expense', color: '#ef4444' },
   { name: 'Room Rent', type: 'expense', color: '#f97316' },
   { name: 'Daily Expenses', type: 'expense', color: '#fda4af' },
-  { name: 'Laptop Purchase', type: 'expense', color: '#8b5cf6' },
+  { name: 'Laptop', type: 'expense', color: '#8b5cf6', children: ['Laptop Purchase', 'Laptop Repair'] },
   { name: 'Personal Expense', type: 'expense', color: '#f43f5e' },
   { name: 'Loan Repayment', type: 'expense', color: '#fb7185' },
   { name: 'Mobile Recharge', type: 'expense', color: '#eab308' },
@@ -85,13 +91,13 @@ const CATEGORIES: Array<{ name: string; type: CatType; color: string; children?:
   { name: 'Shopping', type: 'expense', color: '#d946ef' },
   { name: 'Electronics', type: 'expense', color: '#a855f7' },
   { name: 'Furniture & Household', type: 'expense', color: '#c084fc' },
-  { name: 'Repair & Servicing', type: 'expense', color: '#7c3aed', children: ['Laptop Repair'] },
   { name: 'Office Purchase (reimbursed)', type: 'expense', color: '#a3a3a3' },
   { name: 'Bank Charges', type: 'expense', color: '#78716c' },
   { name: 'Unrecorded Outflow', type: 'expense', color: '#9ca3af' },
   { name: 'Internal Transfer', type: 'transfer', color: '#3b82f6' },
   { name: 'Cash In & Returns', type: 'transfer', color: '#0ea5e9' },
-  { name: 'Amanat', type: 'transfer', color: '#a855f7' },
+  { name: 'Amanat (held in trust)', type: 'transfer', color: '#a855f7', children: ['Amanat — Ammu'] },
+  { name: 'Loans Given', type: 'transfer', color: '#0d9488', children: ['Loan — Lucky apu'] },
 ];
 
 /**
@@ -193,9 +199,9 @@ const MANUAL: Array<{ at: string; type: CatType; amount: number; acc: AccKey; to
   { at: '2026-04-29 17:55', type: 'expense', amount: 800, acc: 'cash', cat: 'Laptop Repair', desc: 'Laptop display change (2nd) — cash part' },
   { at: '2026-05-15 19:30', type: 'expense', amount: 3000, acc: 'cash', cat: 'Laptop Repair', desc: 'Laptop servicing' },
   // Ammu's ৳23,000 kept in the bank. Assumed: she gave cash that went in with the ৳24,500 CDM deposit on 15 Jun 2026
-  { at: '2026-06-15 12:00', type: 'transfer', amount: 23000, acc: 'amanat', to: 'cash', cat: 'Amanat', desc: "Ammu's money to keep (amanat) — deposited to bank on 15 Jun 2026" },
+  { at: '2026-06-15 12:00', type: 'transfer', amount: 23000, acc: 'amanat', to: 'cash', cat: 'Amanat — Ammu', desc: "Ammu's money to keep (amanat) — deposited to bank on 15 Jun 2026" },
   // 7 Sep 2026: ৳4,500 bank → Rocket, then Rocket cash-out ৳5,000 → lent to Lucky apu
-  { at: '2026-09-07 19:45', type: 'transfer', amount: 5000, acc: 'cash', to: 'loans', cat: 'Internal Transfer', desc: 'Lent to Lucky apu (Rocket cash-out)' },
+  { at: '2026-09-07 19:45', type: 'transfer', amount: 5000, acc: 'cash', to: 'loans', cat: 'Loan — Lucky apu', desc: 'Lent to Lucky apu (Rocket cash-out)' },
   // 19 Sep 2026: ৳43,000 withdrawn → ৳8,000 home (Nagad), ৳30,000 repaid to Mukty apu (money given via home), rest cash
   { at: '2026-09-19 19:30', type: 'expense', amount: 30000, acc: 'cash', cat: 'Loan Repayment', desc: 'Repaid Mukty apu (money originally given via home)' },
 ];
@@ -841,13 +847,37 @@ async function applyToDb(l: ReturnType<typeof build>) {
 
   await db.transaction(async (tx) => {
     await tx.execute(sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS is_historical boolean DEFAULT false NOT NULL`);
+
+    // Never silently delete entries typed into the app
+    const live = await tx.execute(sql`SELECT count(*)::int AS n FROM transactions WHERE is_historical = false`);
+    const liveCount = (live.rows[0] as { n: number }).n;
+    if (liveCount > 0 && !FORCE_WIPE) {
+      throw new Error(`${liveCount} transaction(s) were entered in the app since the import; --apply would delete them. Aborting (use --force-wipe to override).`);
+    }
+
+    // Saved Insights groups, remembered by category name so they can be re-linked after the reinsert
+    await tx.execute(sql`CREATE TABLE IF NOT EXISTS category_groups (
+      id serial PRIMARY KEY,
+      user_id integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name varchar(100) NOT NULL,
+      category_ids integer[] NOT NULL,
+      created_at timestamptz DEFAULT now() NOT NULL,
+      updated_at timestamptz DEFAULT now() NOT NULL
+    )`);
+    await tx.execute(sql`CREATE INDEX IF NOT EXISTS category_group_user_id_idx ON category_groups (user_id)`);
+    const savedGroups = (await tx.execute(sql`
+      SELECT g.name, ARRAY(SELECT c.name FROM categories c WHERE c.id = ANY(g.category_ids)) AS category_names
+      FROM category_groups g ORDER BY g.id`)).rows as Array<{ name: string; category_names: string[] }>;
+
+    await tx.execute(sql`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS role varchar(20) DEFAULT 'own' NOT NULL`);
+    await tx.execute(sql`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS show_on_dashboard boolean DEFAULT true NOT NULL`);
     await tx.execute(sql`CREATE INDEX IF NOT EXISTS transaction_is_historical_idx ON transactions (is_historical)`);
-    await tx.execute(sql`TRUNCATE TABLE transactions, accounts, categories, users RESTART IDENTITY CASCADE`);
+    await tx.execute(sql`TRUNCATE TABLE category_groups, transactions, accounts, categories, users RESTART IDENTITY CASCADE`);
     const [user] = await tx.insert(schema.users).values({ ...USER, passwordHash }).returning();
 
     const accId = {} as Record<AccKey, number>;
     for (const k of Object.keys(ACCOUNTS) as AccKey[]) {
-      const [a] = await tx.insert(schema.accounts).values({ userId: user.id, ...ACCOUNTS[k], balance: l.booked[k], currency: 'BDT' }).returning();
+      const [a] = await tx.insert(schema.accounts).values({ userId: user.id, ...ACCOUNTS[k], role: ACCOUNTS[k].role ?? 'own', balance: l.booked[k], currency: 'BDT' }).returning();
       accId[k] = a.id;
     }
 
@@ -859,6 +889,11 @@ async function applyToDb(l: ReturnType<typeof build>) {
         const [ch] = await tx.insert(schema.categories).values({ name: child, type: c.type, color: c.color, parentId: row.id }).returning();
         catId[child] = ch.id;
       }
+    }
+
+    for (const g of savedGroups) {
+      const ids = g.category_names.map(n => catId[n]).filter(Boolean);
+      if (ids.length) await tx.insert(schema.categoryGroups).values({ userId: user.id, name: g.name, categoryIds: ids });
     }
 
     const values = l.rows.map(r => {

@@ -53,11 +53,6 @@ export async function GET(request: Request) {
   const totalIncome = summaryResult.find(r => r.type === 'income')?.total || 0;
   const totalExpense = summaryResult.find(r => r.type === 'expense')?.total || 0;
 
-  // Total accounts balance
-  const [balanceResult] = await db
-    .select({ total: sql<number>`COALESCE(SUM(${accounts.balance}), 0)::int` })
-    .from(accounts)
-    .where(and(myAccounts, eq(accounts.currency, currency)));
 
   // Daily trend (for the selected month)
   const dailyData = await db
@@ -160,23 +155,41 @@ export async function GET(request: Request) {
       color: accounts.color,
       icon: accounts.icon,
       currency: accounts.currency,
+      role: accounts.role,
+      showOnDashboard: accounts.showOnDashboard,
     })
     .from(accounts)
     .where(myAccounts)
     .orderBy(accounts.name);
+
+  // What the balances mean together (same currency only):
+  //   own = bank + wallets + cash, held = amanat kept for others (negative), receivable = lent out
+  const inCurrency = accountBalances.filter(a => a.currency === currency);
+  const sumRole = (role: string) => inCurrency.filter(a => a.role === role).reduce((s, a) => s + a.balance, 0);
+  const own = sumRole('own');
+  const held = sumRole('held');
+  const receivable = sumRole('receivable');
+  const money = {
+    inAccounts: own,          // what the bank/wallets/cash actually hold
+    heldForOthers: -held,     // amanat inside that money (positive number)
+    myMoney: own + held,      // mine, available now
+    owedToMe: receivable,     // mine, but with someone else
+    netWorth: own + held + receivable,
+  };
 
   return NextResponse.json({
     summary: {
       totalIncome,
       totalExpense,
       netBalance: totalIncome - totalExpense,
-      totalAccountsBalance: balanceResult.total,
+      totalAccountsBalance: money.myMoney,
     },
     dailyTrend,
     categoryBreakdown: categoryBreakdown.filter(c => c.amount > 0),
     monthlyComparison,
     recentTransactions,
     accountBalances,
+    money,
   });
 }
 

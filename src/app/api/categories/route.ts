@@ -1,35 +1,44 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { categories } from "@/db/schema";
-import { eq, isNull, and } from "drizzle-orm";
+import { accounts, categories, transactions } from "@/db/schema";
+import { and, eq, sql } from "drizzle-orm";
+import { getSession } from "@/lib/auth";
+
+const TYPES = ["income", "expense", "transfer"] as const;
 
 export async function GET(request: Request) {
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
   const { searchParams } = new URL(request.url);
   const isFlat = searchParams.get("flat") === "true";
 
   try {
-    const allActiveCategories = await db
-      .select()
+    // Active categories, each with how many of this user's transactions use it
+    const rows = await db
+      .select({
+        id: categories.id,
+        name: categories.name,
+        type: categories.type,
+        parentId: categories.parentId,
+        icon: categories.icon,
+        color: categories.color,
+        isActive: categories.isActive,
+        txnCount: sql<number>`(
+          SELECT count(*)::int FROM ${transactions}
+          WHERE ${transactions.categoryId} = ${categories.id}
+            AND ${transactions.accountId} IN (SELECT ${accounts.id} FROM ${accounts} WHERE ${accounts.userId} = ${session.userId})
+        )`,
+      })
       .from(categories)
-      .where(eq(categories.isActive, true));
+      .where(eq(categories.isActive, true))
+      .orderBy(categories.name);
 
-    if (isFlat) {
-      return NextResponse.json(allActiveCategories);
-    }
+    if (isFlat) return NextResponse.json(rows);
 
-    // Build tree
-    const rootCategories = allActiveCategories.filter(c => !c.parentId);
-    const buildTree = (cats: typeof rootCategories) => {
-      return cats.map(cat => ({
-        ...cat,
-        children: allActiveCategories.filter(c => c.parentId === cat.id).map(c => ({
-          ...c,
-          children: allActiveCategories.filter(sub => sub.parentId === c.id) // simplistic tree for now, usually just 2 levels anyway
-        }))
-      }));
-    };
-
-    const tree = buildTree(rootCategories);
+    const tree = rows
+      .filter(c => !c.parentId)
+      .map(cat => ({ ...cat, children: rows.filter(c => c.parentId === cat.id) }));
     return NextResponse.json(tree);
   } catch (error) {
     console.error("Error fetching categories:", error);
@@ -38,23 +47,29 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    const { name, type, parentId, icon, color } = body;
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    if (!name || !type) {
-      return NextResponse.json({ error: "Name and type are required" }, { status: 400 });
+  try {
+    const { name, type, parentId, icon, color } = await request.json();
+
+    if (!name?.trim() || !TYPES.includes(type)) {
+      return NextResponse.json({ error: "Name and a valid type are required" }, { status: 400 });
+    }
+
+    if (parentId) {
+      const [parent] = await db.select().from(categories).where(and(eq(categories.id, parentId), eq(categories.isActive, true)));
+      if (!parent) return NextResponse.json({ error: "Parent category not found" }, { status: 400 });
+      if (parent.type !== type) return NextResponse.json({ error: `Parent is a ${parent.type} category` }, { status: 400 });
+      if (parent.parentId) return NextResponse.json({ error: "Sub-categories can't have their own sub-categories" }, { status: 400 });
     }
 
     const [newCategory] = await db.insert(categories).values({
-      name,
+      name: name.trim(),
       type,
       parentId: parentId || null,
       icon,
       color,
-      isActive: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     }).returning();
 
     return NextResponse.json(newCategory, { status: 201 });

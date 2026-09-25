@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, MoreHorizontal, Pencil, Trash2, Search, X, ChevronLeft, ChevronRight, Loader2, Inbox } from 'lucide-react';
+import { Plus, MoreHorizontal, Pencil, Trash2, Search, X, Loader2, Inbox, Check, Minus, Tags } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -12,6 +12,8 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { PageHeader, Refreshable, ErrorBanner } from '@/components/page-header';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { Pagination } from '@/components/pagination';
+import { categoryItems as buildCategoryItems, categoryTree, TYPE_LABELS as CAT_TYPE_LABELS } from '@/lib/categories';
 import { TxnAmount, TxnTypeIcon, HistoricalBadge, type TxnType } from '@/components/txn-bits';
 import { formatCurrency, formatDate, fromPaisa } from '@/lib/formatters';
 import { useHistoricalMode } from '@/lib/use-historical-mode';
@@ -73,7 +75,7 @@ export default function TransactionsPage() {
   const listUrl = useMemo(() => {
     const p = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE), historical: mode });
     if (filterType !== 'all') p.set('type', filterType);
-    if (filterCategoryId !== 'all') p.set('categoryId', filterCategoryId);
+    if (filterCategoryId !== 'all') p.set('categoryIds', filterCategoryId);
     if (filterAccountId !== 'all') p.set('accountId', filterAccountId);
     if (filterStartDate) p.set('startDate', filterStartDate);
     if (filterEndDate) p.set('endDate', filterEndDate);
@@ -87,7 +89,7 @@ export default function TransactionsPage() {
   const categories = useMemo(() => (Array.isArray(cats.data) ? cats.data : []), [cats.data]);
   const accounts = useMemo(() => accs.data?.accounts ?? [], [accs.data]);
 
-  const categoryItems = useMemo(() => Object.fromEntries(categories.map(c => [String(c.id), c.name])), [categories]);
+  const categoryItems = useMemo(() => buildCategoryItems(categories), [categories]);
   const accountItems = useMemo(() => Object.fromEntries(accounts.map(a => [String(a.id), a.name])), [accounts]);
 
   const hasActiveFilters = filterType !== 'all' || filterCategoryId !== 'all' || filterAccountId !== 'all' || filterStartDate || filterEndDate || searchInput;
@@ -99,6 +101,35 @@ export default function TransactionsPage() {
     setFilterEndDate('');
     setSearchInput('');
     setPage(1);
+  };
+
+  // Bulk selection (cleared whenever the visible list changes)
+  const [selection, setSelection] = useState<{ url: string; ids: Set<number> }>({ url: '', ids: new Set() });
+  const selectedIds = selection.url === listUrl ? selection.ids : new Set<number>();
+  const toggleSelected = (id: number) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setSelection({ url: listUrl, ids: next });
+  };
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkMessage, setBulkMessage] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
+  const applyBulkCategory = async (categoryId: number) => {
+    setBulkBusy(true);
+    setBulkMessage(null);
+    try {
+      const res = await apiFetch<{ updated: number }>('/api/transactions/bulk', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [...selectedIds], categoryId }),
+      });
+      setBulkMessage({ tone: 'ok', text: `Moved ${res.updated} transaction${res.updated === 1 ? '' : 's'} to ${categoryItems[String(categoryId)]}` });
+      setSelection({ url: '', ids: new Set() });
+      list.reload();
+    } catch (err) {
+      setBulkMessage({ tone: 'error', text: err instanceof Error ? err.message : 'Could not change category' });
+    } finally {
+      setBulkBusy(false);
+    }
   };
 
   // Add / edit dialog
@@ -158,11 +189,12 @@ export default function TransactionsPage() {
     }
   };
 
-  const formCategories = categories.filter(c => c.type === form.type);
-  const rootCats = formCategories.filter(c => c.parentId === null);
-  const childrenOf = (id: number) => formCategories.filter(c => c.parentId === id);
+  const formTree = categoryTree(categories, form.type);
 
   const txns = list.data?.transactions ?? [];
+  const allOnPage = txns.length > 0 && txns.every(t => selectedIds.has(t.id));
+  const someOnPage = txns.some(t => selectedIds.has(t.id));
+  const selectedTypes = new Set(txns.filter(t => selectedIds.has(t.id)).map(t => t.type));
   const total = list.data?.total ?? 0;
   const totalPages = Math.max(list.data?.totalPages ?? 1, 1);
 
@@ -191,14 +223,15 @@ export default function TransactionsPage() {
           <SelectContent className="max-h-80">
             <SelectItem value="all">All categories</SelectItem>
             {(['expense', 'income', 'transfer'] as const).map(t => {
-              const group = categories.filter(c => c.type === t);
-              if (!group.length) return null;
+              const tree = categoryTree(categories, t);
+              if (!tree.length) return null;
               return (
                 <SelectGroup key={t}>
-                  <SelectLabel className="capitalize">{t}</SelectLabel>
-                  {group.map(c => (
-                    <SelectItem key={c.id} value={String(c.id)} className={c.parentId ? 'pl-5' : undefined}>{c.name}</SelectItem>
-                  ))}
+                  <SelectLabel>{CAT_TYPE_LABELS[t]}</SelectLabel>
+                  {tree.map(root => [
+                    <SelectItem key={root.id} value={String(root.id)}>{root.name}{root.children.length ? ' (all)' : ''}</SelectItem>,
+                    ...root.children.map(ch => <SelectItem key={ch.id} value={String(ch.id)} className="pl-6">{ch.name}</SelectItem>),
+                  ])}
                 </SelectGroup>
               );
             })}
@@ -219,6 +252,43 @@ export default function TransactionsPage() {
       </div>
 
       {list.error && <ErrorBanner message={list.error} onRetry={list.reload} />}
+
+      {bulkMessage && (
+        <div role="status" className={cn('flex items-center justify-between gap-3 rounded-lg px-4 py-2.5 text-sm', bulkMessage.tone === 'ok' ? 'bg-success/10 text-success' : 'bg-destructive/10 text-destructive')}>
+          {bulkMessage.text}
+          <button type="button" onClick={() => setBulkMessage(null)} aria-label="Dismiss"><X className="h-4 w-4" /></button>
+        </div>
+      )}
+
+      {selectedIds.size > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-2.5 text-sm">
+          <span className="font-medium">{selectedIds.size} selected</span>
+          <Select
+            items={categoryItems}
+            value={null}
+            onValueChange={(v) => v && applyBulkCategory(Number(v))}
+            disabled={bulkBusy}
+          >
+            <SelectTrigger className="w-60" aria-label="Change category">
+              {bulkBusy ? <Loader2 className="animate-spin" /> : <Tags className="text-muted-foreground" />}
+              <SelectValue placeholder="Change category to…" />
+            </SelectTrigger>
+            <SelectContent className="max-h-80">
+              {[...selectedTypes].map(t => (
+                <SelectGroup key={t}>
+                  <SelectLabel>{CAT_TYPE_LABELS[t]}</SelectLabel>
+                  {categoryTree(categories, t).map(root => [
+                    <SelectItem key={root.id} value={String(root.id)}>{root.name}</SelectItem>,
+                    ...root.children.map(ch => <SelectItem key={ch.id} value={String(ch.id)} className="pl-6">{ch.name}</SelectItem>),
+                  ])}
+                </SelectGroup>
+              ))}
+            </SelectContent>
+          </Select>
+          {selectedTypes.size > 1 && <span className="text-xs text-muted-foreground">Selection mixes types — only one type can share a category.</span>}
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setSelection({ url: '', ids: new Set() })}>Clear selection</Button>
+        </div>
+      )}
 
       {/* Table */}
       <div className="overflow-hidden rounded-xl border bg-card shadow-xs">
@@ -241,7 +311,15 @@ export default function TransactionsPage() {
               <Table>
                 <TableHeader>
                   <TableRow className="bg-muted/40 hover:bg-muted/40">
-                    <TableHead className="w-28 pl-4">Date</TableHead>
+                    <TableHead className="w-10 pl-4">
+                      <SelectBox
+                        checked={allOnPage}
+                        indeterminate={!allOnPage && someOnPage}
+                        label="Select all on this page"
+                        onClick={() => setSelection({ url: listUrl, ids: allOnPage ? new Set() : new Set(txns.map(t => t.id)) })}
+                      />
+                    </TableHead>
+                    <TableHead className="w-28">Date</TableHead>
                     <TableHead>Description</TableHead>
                     <TableHead>Category</TableHead>
                     <TableHead>Account</TableHead>
@@ -251,8 +329,11 @@ export default function TransactionsPage() {
                 </TableHeader>
                 <TableBody>
                   {txns.map((txn) => (
-                    <TableRow key={txn.id} className="group">
-                      <TableCell className="pl-4 text-sm whitespace-nowrap text-muted-foreground">{formatDate(txn.date)}</TableCell>
+                    <TableRow key={txn.id} className="group" data-state={selectedIds.has(txn.id) ? 'selected' : undefined}>
+                      <TableCell className="pl-4">
+                        <SelectBox checked={selectedIds.has(txn.id)} label="Select transaction" onClick={() => toggleSelected(txn.id)} />
+                      </TableCell>
+                      <TableCell className="text-sm whitespace-nowrap text-muted-foreground">{formatDate(txn.date)}</TableCell>
                       <TableCell>
                         <div className="flex min-w-0 items-center gap-3">
                           <TxnTypeIcon type={txn.type} className="h-7 w-7" />
@@ -260,7 +341,7 @@ export default function TransactionsPage() {
                           {txn.isHistorical && <HistoricalBadge />}
                         </div>
                       </TableCell>
-                      <TableCell className="text-sm">{txn.categoryName}</TableCell>
+                      <TableCell className="text-sm">{categoryItems[String(txn.categoryId)] ?? txn.categoryName}</TableCell>
                       <TableCell className="text-sm text-muted-foreground">
                         {txn.accountName}
                         {txn.type === 'transfer' && txn.toAccountId && accountItems[String(txn.toAccountId)] && (
@@ -289,11 +370,7 @@ export default function TransactionsPage() {
               <p className="text-muted-foreground">
                 {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total.toLocaleString()}
               </p>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="icon-sm" disabled={page <= 1} onClick={() => setPage(p => p - 1)} aria-label="Previous page"><ChevronLeft /></Button>
-                <span className="tabular min-w-20 text-center text-muted-foreground">Page {page} / {totalPages}</span>
-                <Button variant="outline" size="icon-sm" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)} aria-label="Next page"><ChevronRight /></Button>
-              </div>
+              <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
             </div>
           </Refreshable>
         )}
@@ -347,18 +424,15 @@ export default function TransactionsPage() {
               <Select items={categoryItems} value={form.categoryId || null} onValueChange={(v) => setForm(f => ({ ...f, categoryId: (v as string) || '' }))}>
                 <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
                 <SelectContent className="max-h-72">
-                  {rootCats.map(root => {
-                    const kids = childrenOf(root.id);
-                    return kids.length ? (
-                      <SelectGroup key={root.id}>
-                        <SelectLabel>{root.name}</SelectLabel>
-                        <SelectItem value={String(root.id)}>{root.name} (general)</SelectItem>
-                        {kids.map(child => <SelectItem key={child.id} value={String(child.id)} className="pl-5">{child.name}</SelectItem>)}
-                      </SelectGroup>
-                    ) : (
-                      <SelectItem key={root.id} value={String(root.id)}>{root.name}</SelectItem>
-                    );
-                  })}
+                  {formTree.map(root => root.children.length ? (
+                    <SelectGroup key={root.id}>
+                      <SelectLabel>{root.name}</SelectLabel>
+                      <SelectItem value={String(root.id)}>{root.name} (general)</SelectItem>
+                      {root.children.map(child => <SelectItem key={child.id} value={String(child.id)} className="pl-6">{child.name}</SelectItem>)}
+                    </SelectGroup>
+                  ) : (
+                    <SelectItem key={root.id} value={String(root.id)}>{root.name}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -426,5 +500,23 @@ export default function TransactionsPage() {
         }}
       />
     </>
+  );
+}
+
+function SelectBox({ checked, indeterminate, label, onClick }: { checked: boolean; indeterminate?: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={indeterminate ? 'mixed' : checked}
+      aria-label={label}
+      onClick={onClick}
+      className={cn(
+        'flex h-4 w-4 items-center justify-center rounded border transition-colors',
+        checked || indeterminate ? 'border-primary bg-primary text-primary-foreground' : 'border-input hover:border-foreground/40',
+      )}
+    >
+      {checked ? <Check className="h-3 w-3" /> : indeterminate ? <Minus className="h-3 w-3" /> : null}
+    </button>
   );
 }

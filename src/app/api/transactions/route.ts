@@ -1,20 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { transactions, categories, accounts } from '@/db/schema';
-import { eq, desc, and, like, gte, lte, sql, count } from 'drizzle-orm';
+import { eq, desc, and, ilike, gte, lte, count, inArray, sql } from 'drizzle-orm';
 import { getSession } from '@/lib/auth';
 import { validateTransaction } from '@/lib/transaction-validation';
 import { parseHistoricalMode } from '@/lib/historical';
+import { parseIds, withSubcategories } from '@/lib/category-scope';
 
 export async function GET(request: NextRequest) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const searchParams = request.nextUrl.searchParams;
-  const page = parseInt(searchParams.get('page') || '1');
-  const limit = parseInt(searchParams.get('limit') || '20');
+  const page = Math.max(parseInt(searchParams.get('page') || '1') || 1, 1);
+  const limit = Math.min(Math.max(parseInt(searchParams.get('limit') || '20') || 20, 1), 1000);
   const type = searchParams.get('type');
-  const categoryId = searchParams.get('categoryId');
+  // categoryIds=1,2 (or legacy categoryId=1); sub-categories of a selected category are included
+  const categoryIds = parseIds(searchParams.get('categoryIds') ?? searchParams.get('categoryId'));
   const accountId = searchParams.get('accountId');
   const startDate = searchParams.get('startDate');
   const endDate = searchParams.get('endDate');
@@ -23,11 +25,11 @@ export async function GET(request: NextRequest) {
 
   const conditions = [eq(accounts.userId, session.userId)];
   if (type) conditions.push(eq(transactions.type, type as 'income' | 'expense' | 'transfer'));
-  if (categoryId) conditions.push(eq(transactions.categoryId, parseInt(categoryId)));
+  if (categoryIds.length) conditions.push(inArray(transactions.categoryId, await withSubcategories(categoryIds)));
   if (accountId) conditions.push(eq(transactions.accountId, parseInt(accountId)));
   if (startDate) conditions.push(gte(transactions.date, startDate));
   if (endDate) conditions.push(lte(transactions.date, endDate));
-  if (search) conditions.push(like(transactions.description, `%${search}%`));
+  if (search) conditions.push(ilike(transactions.description, `%${search}%`));
   if (historical !== 'include') conditions.push(eq(transactions.isHistorical, historical === 'only'));
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;

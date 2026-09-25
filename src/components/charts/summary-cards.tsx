@@ -26,7 +26,7 @@ export function SummaryCards({ totalIncome, totalExpense, netBalance, totalAccou
       tone: netBalance >= 0 ? 'bg-success/10 text-success' : 'bg-destructive/10 text-destructive',
       signed: true,
     },
-    { title: 'Total balance', hint: 'All accounts, today', amount: totalAccountsBalance, icon: Wallet, tone: 'bg-primary/10 text-primary' },
+    { title: 'My money', hint: 'All accounts minus amanat, today', amount: totalAccountsBalance, icon: Wallet, tone: 'bg-primary/10 text-primary' },
   ];
 
   return (

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { accounts } from "@/db/schema";
+import { accounts, ACCOUNT_ROLES } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 
@@ -16,7 +16,10 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     const userId = session.userId;
     const body = await request.json();
     
-    const { name, type, icon, color, isActive } = body;
+    const { name, type, icon, color, isActive, role, showOnDashboard } = body;
+    if (role !== undefined && !ACCOUNT_ROLES.includes(role)) {
+      return NextResponse.json({ error: "Invalid account role" }, { status: 400 });
+    }
 
     const updateData: Partial<typeof accounts.$inferInsert> = {};
     if (name !== undefined) updateData.name = name;
@@ -24,6 +27,8 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     if (icon !== undefined) updateData.icon = icon;
     if (color !== undefined) updateData.color = color;
     if (isActive !== undefined) updateData.isActive = isActive;
+    if (role !== undefined) updateData.role = role;
+    if (showOnDashboard !== undefined) updateData.showOnDashboard = Boolean(showOnDashboard);
     
     updateData.updatedAt = new Date();
 

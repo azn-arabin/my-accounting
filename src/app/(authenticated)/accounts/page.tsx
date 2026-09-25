@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { Wallet, Landmark, Smartphone, CreditCard, CircleDot, MoreHorizontal, Plus, Pencil, Trash2, Loader2, Check } from 'lucide-react';
+import { Wallet, Landmark, Smartphone, CreditCard, CircleDot, MoreHorizontal, Plus, Pencil, Trash2, Loader2, Check, Eye, EyeOff } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,6 +17,8 @@ import { cn } from '@/lib/utils';
 
 type AccountType = 'cash' | 'bank' | 'mobile_banking' | 'credit_card' | 'other';
 
+type AccountRole = 'own' | 'receivable' | 'held';
+
 interface Account {
   id: number;
   name: string;
@@ -23,7 +26,21 @@ interface Account {
   balance: number;
   currency: string;
   color: string | null;
+  role: AccountRole;
+  showOnDashboard: boolean;
 }
+
+const ROLE_LABELS: Record<AccountRole, string> = {
+  own: 'My money',
+  receivable: 'Owed to me',
+  held: 'Held in trust (amanat)',
+};
+
+const ROLE_HINTS: Record<AccountRole, string> = {
+  own: 'Bank, wallets and cash that belong to you',
+  receivable: 'Money you lent — yours, but with someone else',
+  held: "Money you keep for someone else; it's inside your accounts but not yours",
+};
 
 const typeIcons: Record<AccountType, typeof Wallet> = {
   cash: Wallet,
@@ -43,12 +60,16 @@ const TYPE_LABELS: Record<AccountType, string> = {
 
 const SWATCHES = ['#005bea', '#8b5cf6', '#ec4899', '#f97316', '#10b981', '#0d9488', '#eab308', '#64748b'];
 
-const emptyForm = { name: '', type: 'cash' as AccountType, balance: '', color: SWATCHES[0] };
+const emptyForm = { name: '', type: 'cash' as AccountType, balance: '', color: SWATCHES[0], role: 'own' as AccountRole, showOnDashboard: true };
 
 export default function AccountsPage() {
   const { data, error, loading, refreshing, reload } = useApi<{ accounts: Account[] }>('/api/accounts');
   const accounts = data?.accounts ?? [];
-  const total = accounts.reduce((s, a) => s + a.balance, 0);
+  const sum = (role: AccountRole) => accounts.filter(a => a.role === role).reduce((s, a) => s + a.balance, 0);
+  const inAccounts = sum('own');
+  const heldForOthers = -sum('held');
+  const owedToMe = sum('receivable');
+  const myMoney = inAccounts - heldForOthers;
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Account | null>(null);
@@ -66,9 +87,15 @@ export default function AccountsPage() {
 
   const openEdit = (a: Account) => {
     setEditing(a);
-    setForm({ name: a.name, type: a.type, balance: '', color: a.color || SWATCHES[0] });
+    setForm({ name: a.name, type: a.type, balance: '', color: a.color || SWATCHES[0], role: a.role, showOnDashboard: a.showOnDashboard });
     setFormError('');
     setDialogOpen(true);
+  };
+
+  // Money held for someone is owed back, so it's stored as a negative balance
+  const openingBalance = () => {
+    const n = form.balance ? Math.abs(Number(form.balance)) : 0;
+    return form.role === 'held' ? -n : form.role === 'receivable' ? n : Number(form.balance || 0);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -81,8 +108,8 @@ export default function AccountsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
           editing
-            ? { name: form.name, type: form.type, color: form.color }
-            : { name: form.name, type: form.type, color: form.color, balance: form.balance ? Number(form.balance) : 0 },
+            ? { name: form.name, type: form.type, color: form.color, role: form.role, showOnDashboard: form.showOnDashboard }
+            : { name: form.name, type: form.type, color: form.color, role: form.role, showOnDashboard: form.showOnDashboard, balance: openingBalance() },
         ),
       });
       setDialogOpen(false);
@@ -92,6 +119,15 @@ export default function AccountsPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const toggleDashboard = async (a: Account) => {
+    await apiFetch(`/api/accounts/${a.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ showOnDashboard: !a.showOnDashboard }),
+    });
+    reload();
   };
 
   return (
@@ -110,10 +146,15 @@ export default function AccountsPage() {
         </div>
       ) : (
         <Refreshable refreshing={refreshing} className="space-y-6">
-          <div className="rounded-xl border bg-gradient-to-br from-primary/10 via-card to-card p-6 shadow-xs">
-            <p className="text-sm font-medium text-muted-foreground">Total balance</p>
-            <p className="mt-1 text-3xl font-semibold tracking-tight">{formatCurrency(total)}</p>
-            <p className="mt-1 text-xs text-muted-foreground">Across {accounts.length} account{accounts.length === 1 ? '' : 's'}</p>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-xl border bg-gradient-to-br from-primary/10 via-card to-card p-5 shadow-xs sm:col-span-2 xl:col-span-1">
+              <p className="text-sm font-medium text-muted-foreground">My money</p>
+              <p className="tabular mt-1 text-3xl font-semibold tracking-tight">{formatCurrency(myMoney)}</p>
+              <p className="mt-1 text-xs text-muted-foreground">In accounts minus money held for others</p>
+            </div>
+            <MoneyTile label="In accounts" value={inAccounts} hint="Bank + wallets + cash" />
+            <MoneyTile label="Held for others" value={heldForOthers} hint="Amanat inside your accounts" sign="−" />
+            <MoneyTile label="Owed to me" value={owedToMe} hint={`Net worth ${formatCurrency(myMoney + owedToMe)}`} />
           </div>
 
           {accounts.length === 0 ? (
@@ -126,43 +167,63 @@ export default function AccountsPage() {
               <Button onClick={openAdd}><Plus /> Add account</Button>
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {accounts.map((a) => {
-                const Icon = typeIcons[a.type] || Wallet;
-                const color = a.color || 'var(--muted-foreground)';
-                return (
-                  <div key={a.id} className="group relative overflow-hidden rounded-xl border bg-card p-5 shadow-xs transition-shadow hover:shadow-md">
-                    <div aria-hidden className="absolute inset-x-0 top-0 h-1" style={{ backgroundColor: color }} />
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex min-w-0 items-center gap-3">
-                        <span
-                          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
-                          style={{ backgroundColor: `color-mix(in oklch, ${color} 14%, transparent)`, color }}
-                        >
-                          <Icon className="h-5 w-5" />
-                        </span>
-                        <div className="min-w-0">
-                          <p className="truncate font-medium">{a.name}</p>
-                          <p className="text-xs text-muted-foreground">{TYPE_LABELS[a.type]}</p>
-                        </div>
-                      </div>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Actions" className="opacity-60 group-hover:opacity-100 data-popup-open:opacity-100" />}>
-                          <MoreHorizontal />
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => openEdit(a)}><Pencil /> Edit</DropdownMenuItem>
-                          <DropdownMenuItem variant="destructive" onClick={() => setDeleting(a)}><Trash2 /> Delete</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                    <p className={cn('tabular mt-5 text-2xl font-semibold tracking-tight', a.balance < 0 && 'text-destructive')}>
-                      {formatCurrency(a.balance)}
-                    </p>
+            (['own', 'receivable', 'held'] as AccountRole[]).map(role => {
+              const group = accounts.filter(a => a.role === role);
+              if (!group.length) return null;
+              return (
+                <section key={role} className="space-y-3">
+                  <div>
+                    <h2 className="text-sm font-semibold">{ROLE_LABELS[role]}</h2>
+                    <p className="text-xs text-muted-foreground">{ROLE_HINTS[role]}</p>
                   </div>
-                );
-              })}
-            </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {group.map((a) => {
+                      const Icon = typeIcons[a.type] || Wallet;
+                      const color = a.color || 'var(--muted-foreground)';
+                      return (
+                        <div key={a.id} className={cn('group relative overflow-hidden rounded-xl border bg-card p-5 shadow-xs transition-shadow hover:shadow-md', !a.showOnDashboard && 'opacity-75')}>
+                          <div aria-hidden className="absolute inset-x-0 top-0 h-1" style={{ backgroundColor: color }} />
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex min-w-0 items-center gap-3">
+                              <span
+                                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
+                                style={{ backgroundColor: `color-mix(in oklch, ${color} 14%, transparent)`, color }}
+                              >
+                                <Icon className="h-5 w-5" />
+                              </span>
+                              <div className="min-w-0">
+                                <p className="truncate font-medium">{a.name}</p>
+                                <p className="text-xs text-muted-foreground">{TYPE_LABELS[a.type]}</p>
+                              </div>
+                            </div>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Actions" className="opacity-60 group-hover:opacity-100 data-popup-open:opacity-100" />}>
+                                <MoreHorizontal />
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-48">
+                                <DropdownMenuItem onClick={() => openEdit(a)}><Pencil /> Edit</DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => toggleDashboard(a)}>
+                                  {a.showOnDashboard ? <><EyeOff /> Hide from dashboard</> : <><Eye /> Show on dashboard</>}
+                                </DropdownMenuItem>
+                                <DropdownMenuItem variant="destructive" onClick={() => setDeleting(a)}><Trash2 /> Delete</DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                          <p className={cn('tabular mt-5 text-2xl font-semibold tracking-tight', a.balance < 0 && role !== 'held' && 'text-destructive')}>
+                            {role === 'held' ? formatCurrency(Math.abs(a.balance)) : formatCurrency(a.balance)}
+                          </p>
+                          <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                            {role === 'held' && 'Kept for them · '}
+                            {role === 'receivable' && 'They owe you · '}
+                            {a.showOnDashboard ? 'On dashboard' : 'Hidden from dashboard'}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              );
+            })
           )}
         </Refreshable>
       )}
@@ -193,10 +254,35 @@ export default function AccountsPage() {
 
             {!editing && (
               <div className="space-y-2">
-                <Label htmlFor="acc-balance">Opening balance (৳)</Label>
+                <Label htmlFor="acc-balance">{form.role === 'held' ? 'Amount you are keeping (৳)' : form.role === 'receivable' ? 'Amount they owe you (৳)' : 'Opening balance (৳)'}</Label>
                 <Input id="acc-balance" type="number" step="0.01" inputMode="decimal" placeholder="0.00" value={form.balance} onChange={(e) => setForm({ ...form, balance: e.target.value })} />
               </div>
             )}
+
+            <div className="space-y-2">
+              <Label>This account is</Label>
+              <Select items={ROLE_LABELS} value={form.role} onValueChange={(v) => setForm({ ...form, role: (v as AccountRole) || 'own' })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(ROLE_LABELS) as AccountRole[]).map(r => (
+                    <SelectItem key={r} value={r}>
+                      <span className="flex flex-col">
+                        <span>{ROLE_LABELS[r]}</span>
+                        <span className="text-xs font-normal text-muted-foreground">{ROLE_HINTS[r]}</span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <label className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
+              <span className="text-sm">
+                Show on dashboard
+                <span className="block text-xs text-muted-foreground">Totals always include every account</span>
+              </span>
+              <Switch checked={form.showOnDashboard} onCheckedChange={(v) => setForm({ ...form, showOnDashboard: v })} />
+            </label>
 
             <div className="space-y-2">
               <Label>Color</Label>
@@ -241,5 +327,15 @@ export default function AccountsPage() {
         }}
       />
     </>
+  );
+}
+
+function MoneyTile({ label, value, hint, sign }: { label: string; value: number; hint: string; sign?: string }) {
+  return (
+    <div className="rounded-xl border bg-card p-5 shadow-xs">
+      <p className="text-sm font-medium text-muted-foreground">{label}</p>
+      <p className="tabular mt-1 text-xl font-semibold tracking-tight">{sign && value ? sign : ''}{formatCurrency(value)}</p>
+      <p className="mt-1 text-xs text-muted-foreground">{hint}</p>
+    </div>
   );
 }

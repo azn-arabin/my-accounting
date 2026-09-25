@@ -30,7 +30,8 @@ interface DashboardData {
     accountName: string | null;
     isHistorical: boolean;
   }>;
-  accountBalances: Array<{ id: number; name: string; balance: number; type: string; color: string | null }>;
+  accountBalances: Array<{ id: number; name: string; balance: number; type: string; color: string | null; role: 'own' | 'receivable' | 'held'; showOnDashboard: boolean }>;
+  money: { inAccounts: number; heldForOthers: number; myMoney: number; owedToMe: number; netWorth: number };
 }
 
 const accountIcons: Record<string, typeof Wallet> = {
@@ -77,30 +78,57 @@ export default function DashboardPage() {
               className="lg:col-span-2"
               action={<Link href="/accounts" className="text-xs font-medium text-primary hover:underline">Manage</Link>}
             >
-              <ul className="-mx-2 divide-y">
-                {data.accountBalances.map((account) => {
-                  const Icon = accountIcons[account.type] || CircleDot;
-                  return (
-                    <li key={account.id} className="flex items-center justify-between gap-3 px-2 py-2.5">
-                      <div className="flex min-w-0 items-center gap-3">
-                        <span
-                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
-                          style={{ backgroundColor: `color-mix(in oklch, ${account.color || 'var(--muted-foreground)'} 14%, transparent)`, color: account.color || undefined }}
-                        >
-                          <Icon className="h-4 w-4" />
-                        </span>
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium">{account.name}</p>
-                          <p className="text-xs text-muted-foreground capitalize">{account.type.replace('_', ' ')}</p>
-                        </div>
-                      </div>
-                      <p className={`tabular text-sm font-semibold ${account.balance < 0 ? 'text-destructive' : ''}`}>
-                        {formatCurrency(account.balance)}
-                      </p>
-                    </li>
-                  );
-                })}
-              </ul>
+              {(() => {
+                const shown = data.accountBalances.filter(a => a.showOnDashboard);
+                const hidden = data.accountBalances.length - shown.length;
+                return (
+                  <>
+                    <ul className="-mx-2 divide-y">
+                      {shown.map((account) => {
+                        const Icon = accountIcons[account.type] || CircleDot;
+                        const held = account.role === 'held';
+                        return (
+                          <li key={account.id} className="flex items-center justify-between gap-3 px-2 py-2.5">
+                            <div className="flex min-w-0 items-center gap-3">
+                              <span
+                                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
+                                style={{ backgroundColor: `color-mix(in oklch, ${account.color || 'var(--muted-foreground)'} 14%, transparent)`, color: account.color || undefined }}
+                              >
+                                <Icon className="h-4 w-4" />
+                              </span>
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-medium">{account.name}</p>
+                                <p className="text-xs text-muted-foreground">
+                                  {account.role === 'own' ? account.type.replace('_', ' ') : account.role === 'held' ? 'Held in trust' : 'Owes you'}
+                                </p>
+                              </div>
+                            </div>
+                            <p className={`tabular text-sm font-semibold ${account.balance < 0 && !held ? 'text-destructive' : ''}`}>
+                              {held ? formatCurrency(Math.abs(account.balance)) : formatCurrency(account.balance)}
+                            </p>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    {hidden > 0 && (
+                      <p className="mt-2 text-xs text-muted-foreground">{hidden} account{hidden === 1 ? '' : 's'} hidden · still counted below</p>
+                    )}
+                    <dl className="mt-4 space-y-1.5 rounded-lg bg-muted/50 p-3 text-sm">
+                      <div className="flex justify-between"><dt className="text-muted-foreground">In accounts</dt><dd className="tabular">{formatCurrency(data.money.inAccounts)}</dd></div>
+                      {data.money.heldForOthers !== 0 && (
+                        <div className="flex justify-between"><dt className="text-muted-foreground">Held for others (amanat)</dt><dd className="tabular">−{formatCurrency(data.money.heldForOthers)}</dd></div>
+                      )}
+                      <div className="flex justify-between border-t pt-1.5 font-semibold"><dt>My money</dt><dd className="tabular">{formatCurrency(data.money.myMoney)}</dd></div>
+                      {data.money.owedToMe !== 0 && (
+                        <>
+                          <div className="flex justify-between"><dt className="text-muted-foreground">Owed to me</dt><dd className="tabular">+{formatCurrency(data.money.owedToMe)}</dd></div>
+                          <div className="flex justify-between text-muted-foreground"><dt>Net worth</dt><dd className="tabular">{formatCurrency(data.money.netWorth)}</dd></div>
+                        </>
+                      )}
+                    </dl>
+                  </>
+                );
+              })()}
             </ChartCard>
           </div>
 
