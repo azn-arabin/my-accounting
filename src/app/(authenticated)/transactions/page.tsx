@@ -1,19 +1,20 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, MoreHorizontal, Pencil, Trash2, Search, X, Loader2, Inbox, Check, Minus, Tags } from 'lucide-react';
+import { Plus, MoreHorizontal, Pencil, Trash2, Search, X, Loader2, Inbox, Check, Minus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { PageHeader, Refreshable, ErrorBanner } from '@/components/page-header';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Pagination } from '@/components/pagination';
-import { categoryItems as buildCategoryItems, categoryTree, TYPE_LABELS as CAT_TYPE_LABELS } from '@/lib/categories';
+import { categoryItems as buildCategoryItems } from '@/lib/categories';
+import { CategoryPicker } from '@/components/category-picker';
 import { TxnAmount, TxnTypeIcon, HistoricalBadge, type TxnType } from '@/components/txn-bits';
 import { formatCurrency, formatDate, fromPaisa } from '@/lib/formatters';
 import { useHistoricalMode } from '@/lib/use-historical-mode';
@@ -189,7 +190,6 @@ export default function TransactionsPage() {
     }
   };
 
-  const formTree = categoryTree(categories, form.type);
 
   const txns = list.data?.transactions ?? [];
   const allOnPage = txns.length > 0 && txns.every(t => selectedIds.has(t.id));
@@ -218,25 +218,14 @@ export default function TransactionsPage() {
             {Object.entries(TYPE_ITEMS).map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
           </SelectContent>
         </Select>
-        <Select items={{ all: 'All categories', ...categoryItems }} value={filterCategoryId} onValueChange={(v) => { setFilterCategoryId((v as string) || 'all'); setPage(1); }}>
-          <SelectTrigger aria-label="Category"><SelectValue /></SelectTrigger>
-          <SelectContent className="max-h-80">
-            <SelectItem value="all">All categories</SelectItem>
-            {(['expense', 'income', 'transfer'] as const).map(t => {
-              const tree = categoryTree(categories, t);
-              if (!tree.length) return null;
-              return (
-                <SelectGroup key={t}>
-                  <SelectLabel>{CAT_TYPE_LABELS[t]}</SelectLabel>
-                  {tree.map(root => [
-                    <SelectItem key={root.id} value={String(root.id)}>{root.name}{root.children.length ? ' (all)' : ''}</SelectItem>,
-                    ...root.children.map(ch => <SelectItem key={ch.id} value={String(ch.id)} className="pl-6">{ch.name}</SelectItem>),
-                  ])}
-                </SelectGroup>
-              );
-            })}
-          </SelectContent>
-        </Select>
+        <CategoryPicker
+          categories={categories}
+          value={filterCategoryId === 'all' ? null : Number(filterCategoryId)}
+          onChange={(id) => { setFilterCategoryId(id === null ? 'all' : String(id)); setPage(1); }}
+          allLabel="All categories"
+          labelFor={(c) => (c.hasChildren ? `${c.name} (+ sub)` : c.name)}
+          aria-label="Category"
+        />
         <Select items={{ all: 'All accounts', ...accountItems }} value={filterAccountId} onValueChange={(v) => { setFilterAccountId((v as string) || 'all'); setPage(1); }}>
           <SelectTrigger aria-label="Account"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -263,28 +252,17 @@ export default function TransactionsPage() {
       {selectedIds.size > 0 && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-2.5 text-sm">
           <span className="font-medium">{selectedIds.size} selected</span>
-          <Select
-            items={categoryItems}
-            value={null}
-            onValueChange={(v) => v && applyBulkCategory(Number(v))}
-            disabled={bulkBusy}
-          >
-            <SelectTrigger className="w-60" aria-label="Change category">
-              {bulkBusy ? <Loader2 className="animate-spin" /> : <Tags className="text-muted-foreground" />}
-              <SelectValue placeholder="Change category to…" />
-            </SelectTrigger>
-            <SelectContent className="max-h-80">
-              {[...selectedTypes].map(t => (
-                <SelectGroup key={t}>
-                  <SelectLabel>{CAT_TYPE_LABELS[t]}</SelectLabel>
-                  {categoryTree(categories, t).map(root => [
-                    <SelectItem key={root.id} value={String(root.id)}>{root.name}</SelectItem>,
-                    ...root.children.map(ch => <SelectItem key={ch.id} value={String(ch.id)} className="pl-6">{ch.name}</SelectItem>),
-                  ])}
-                </SelectGroup>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="w-64">
+            <CategoryPicker
+              categories={categories}
+              value={null}
+              onChange={(id) => id !== null && applyBulkCategory(id)}
+              type={selectedTypes.size === 1 ? [...selectedTypes][0] : undefined}
+              placeholder={bulkBusy ? 'Moving…' : 'Change category to…'}
+              disabled={bulkBusy}
+              aria-label="Change category"
+            />
+          </div>
           {selectedTypes.size > 1 && <span className="text-xs text-muted-foreground">Selection mixes types — only one type can share a category.</span>}
           <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setSelection({ url: '', ids: new Set() })}>Clear selection</Button>
         </div>
@@ -421,20 +399,14 @@ export default function TransactionsPage() {
 
             <div className="space-y-2">
               <Label>Category</Label>
-              <Select items={categoryItems} value={form.categoryId || null} onValueChange={(v) => setForm(f => ({ ...f, categoryId: (v as string) || '' }))}>
-                <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
-                <SelectContent className="max-h-72">
-                  {formTree.map(root => root.children.length ? (
-                    <SelectGroup key={root.id}>
-                      <SelectLabel>{root.name}</SelectLabel>
-                      <SelectItem value={String(root.id)}>{root.name} (general)</SelectItem>
-                      {root.children.map(child => <SelectItem key={child.id} value={String(child.id)} className="pl-6">{child.name}</SelectItem>)}
-                    </SelectGroup>
-                  ) : (
-                    <SelectItem key={root.id} value={String(root.id)}>{root.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <CategoryPicker
+                categories={categories}
+                type={form.type}
+                value={form.categoryId ? Number(form.categoryId) : null}
+                onChange={(id) => setForm(f => ({ ...f, categoryId: id === null ? '' : String(id) }))}
+                placeholder="Select category"
+                aria-label="Category"
+              />
             </div>
 
             <div className={cn('grid gap-4', form.type === 'transfer' && 'sm:grid-cols-2')}>

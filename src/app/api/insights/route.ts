@@ -4,6 +4,7 @@ import { db } from '@/db';
 import { accounts, categories, transactions } from '@/db/schema';
 import { getSession } from '@/lib/auth';
 import { parseHistoricalMode } from '@/lib/historical';
+import { ancestorsOf, descendantIds } from '@/lib/categories';
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const TYPES = ['income', 'expense', 'transfer'] as const;
@@ -63,12 +64,22 @@ export async function GET(request: NextRequest) {
   const allCats = await db.select({ id: categories.id, name: categories.name, parentId: categories.parentId }).from(categories);
   const byId = new Map(allCats.map(c => [c.id, c]));
   const childrenOf = (id: number) => allCats.filter(c => c.parentId === id).map(c => c.id);
+  const branchOf = (id: number) => [id, ...descendantIds(id, allCats)];
+  const topOf = (id: number) => { const c = byId.get(id); return c ? (ancestorsOf(c, byId)[0]?.id ?? id) : id; };
+  /** The direct child of `root` whose branch contains `id` (or `root` itself). */
+  const branchChild = (root: number, id: number) => {
+    const c = byId.get(id);
+    if (!c || id === root) return root;
+    const chain = [...ancestorsOf(c, byId).map(a => a.id), id];
+    const i = chain.indexOf(root);
+    return i >= 0 && i + 1 < chain.length ? chain[i + 1] : root;
+  };
 
   // Which series each category belongs to (first series wins, so nothing is counted twice)
   const owner = new Map<number, SeriesSpec>();
   const overlaps = new Set<string>();
   for (const spec of specs ?? []) {
-    for (const id of spec.ids.flatMap(i => [i, ...childrenOf(i)])) {
+    for (const id of spec.ids.flatMap(branchOf)) {
       if (owner.has(id)) { if (owner.get(id) !== spec) overlaps.add(byId.get(id)?.name ?? String(id)); }
       else owner.set(id, spec);
     }
@@ -93,7 +104,12 @@ export async function GET(request: NextRequest) {
     .groupBy(transactions.categoryId, transactions.type, sql`to_char(${transactions.date}::date, 'YYYY-MM')`);
 
   const label = (id: number) => byId.get(id)?.name ?? 'Unknown';
-  const parentName = (id: number) => { const p = byId.get(id)?.parentId; return p ? label(p) : null; };
+  /** Where a category sits: "Daily Expense › Travel" for "Office" (null at top level). */
+  const parentName = (id: number) => {
+    const c = byId.get(id);
+    const path = c ? ancestorsOf(c, byId).map(a => a.name) : [];
+    return path.length ? path.join(' › ') : null;
+  };
 
   // Series key/name for a transaction's category
   const seriesOf = (categoryId: number): { key: string; name: string; kind: 'category' | 'group'; parentName: string | null } => {
@@ -102,14 +118,16 @@ export async function GET(request: NextRequest) {
       if (spec.name) return { key: spec.key, name: spec.name, kind: 'group', parentName: null };
       const chosen = spec.ids[0];
       if (group === 'sub' && childrenOf(chosen).length) {
-        return categoryId === chosen
-          ? { key: `${spec.key}/${categoryId}`, name: `${label(chosen)} (general)`, kind: 'category', parentName: null }
-          : { key: `${spec.key}/${categoryId}`, name: label(categoryId), kind: 'category', parentName: label(chosen) };
+        // one level down: each direct child with its whole branch, plus entries made on the chosen one itself
+        const part = branchChild(chosen, categoryId);
+        return part === chosen
+          ? { key: `${spec.key}/${chosen}`, name: `${label(chosen)} (general)`, kind: 'category', parentName: null }
+          : { key: `${spec.key}/${part}`, name: label(part), kind: 'category', parentName: label(chosen) };
       }
       return { key: spec.key, name: label(chosen), kind: 'category', parentName: parentName(chosen) };
     }
-    const c = byId.get(categoryId);
-    const id = group === 'main' && c?.parentId ? c.parentId : categoryId;
+    // No series chosen: top-level categories, or every category separately
+    const id = group === 'main' ? topOf(categoryId) : categoryId;
     return { key: `c:${id}`, name: label(id), kind: 'category', parentName: parentName(id) };
   };
 

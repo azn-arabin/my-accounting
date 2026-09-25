@@ -3,12 +3,15 @@ import { db } from "@/db";
 import { accounts, categories, transactions } from "@/db/schema";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
+import { descendantIds } from "@/lib/categories";
 
 /**
  * Move every transaction from one category to another (e.g. merge "Laptop Repair" into "Laptop").
  * Only the category label changes, so balances and amounts are untouched.
  *
  * Body: { targetId, includeSubcategories?, deactivateSource? }
+ * - includeSubcategories: also move the transactions of every category below the source (any depth)
+ * - deactivateSource: hide the source afterwards. Its remaining direct children move up one level.
  */
 export async function POST(
   request: Request,
@@ -25,17 +28,21 @@ export async function POST(
     return NextResponse.json({ error: "Choose a different category to move to" }, { status: 400 });
   }
 
-  const [source] = await db.select().from(categories).where(eq(categories.id, sourceId));
-  const [target] = await db.select().from(categories).where(and(eq(categories.id, targetId), eq(categories.isActive, true)));
+  const all = await db.select({ id: categories.id, parentId: categories.parentId, type: categories.type, isActive: categories.isActive }).from(categories);
+  const byId = new Map(all.map(c => [c.id, c]));
+  const source = byId.get(sourceId);
+  const target = byId.get(targetId);
   if (!source) return NextResponse.json({ error: "Category not found" }, { status: 404 });
-  if (!target) return NextResponse.json({ error: "Target category not found" }, { status: 400 });
+  if (!target || !target.isActive) return NextResponse.json({ error: "Target category not found" }, { status: 400 });
   if (source.type !== target.type) {
     return NextResponse.json({ error: `Can't move ${source.type} transactions into a ${target.type} category` }, { status: 400 });
   }
 
-  const children = await db.select({ id: categories.id }).from(categories).where(eq(categories.parentId, sourceId));
-  const childIds = children.map(c => c.id).filter(cid => cid !== targetId);
-  const fromIds = includeSubcategories ? [sourceId, ...childIds] : [sourceId];
+  const sourceBranch = descendantIds(sourceId, all);
+  const targetBranch = new Set([targetId, ...descendantIds(targetId, all)]);
+  const targetInsideSource = sourceBranch.includes(targetId);
+  // Never pull the target's own branch into it — those transactions are already under the target
+  const fromIds = [sourceId, ...(includeSubcategories ? sourceBranch : [])].filter(cid => !targetBranch.has(cid));
 
   try {
     const moved = await db.transaction(async (tx) => {
@@ -49,20 +56,17 @@ export async function POST(
         .returning({ id: transactions.id });
 
       if (deactivateSource) {
-        await tx.update(categories).set({ isActive: false, updatedAt: new Date() }).where(eq(categories.id, sourceId));
-        // Target was a sub-category of the source: it becomes top level instead of hanging under a hidden parent
-        if (target.parentId === sourceId) {
-          await tx.update(categories).set({ parentId: null, updatedAt: new Date() }).where(eq(categories.id, targetId));
-          target.parentId = null;
+        const now = new Date();
+        // The target must stay visible: if it lives inside the source's branch, lift it to the source's parent
+        if (targetInsideSource) {
+          await tx.update(categories).set({ parentId: source.parentId, updatedAt: now }).where(eq(categories.id, targetId));
         }
-        if (includeSubcategories && childIds.length) {
-          await tx.update(categories).set({ isActive: false, updatedAt: new Date() }).where(inArray(categories.id, childIds));
-        } else if (childIds.length) {
-          // Keep the sub-categories: re-home them under the target (or top level if the target is itself a sub-category)
-          await tx
-            .update(categories)
-            .set({ parentId: target.parentId ? null : targetId, updatedAt: new Date() })
-            .where(inArray(categories.id, childIds));
+        if (includeSubcategories) {
+          await tx.update(categories).set({ isActive: false, updatedAt: now }).where(inArray(categories.id, fromIds));
+        } else {
+          await tx.update(categories).set({ isActive: false, updatedAt: now }).where(eq(categories.id, sourceId));
+          // Keep its sub-categories: they move up one level (always within the depth limit)
+          await tx.update(categories).set({ parentId: source.parentId, updatedAt: now }).where(eq(categories.parentId, sourceId));
         }
       }
       return updated.length;

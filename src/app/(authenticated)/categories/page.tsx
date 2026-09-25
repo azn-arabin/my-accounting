@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { ChevronDown, CornerDownRight, Pencil, Plus, Trash2, Loader2, Check, MoveRight, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil, Plus, Trash2, Loader2, Check, MoveRight, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -9,68 +9,59 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { PageHeader, Refreshable, ErrorBanner } from '@/components/page-header';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { CategoryPicker } from '@/components/category-picker';
 import { apiFetch, useApi } from '@/lib/use-api';
 import { cn } from '@/lib/utils';
-import { categoryItems as buildCategoryItems, categoryTree } from '@/lib/categories';
+import {
+  ancestorsOf, branchHeight, depthOf, descendantIds, MAX_CATEGORY_DEPTH, nestTree, TYPE_LABELS,
+  type CategoryLite, type CategoryNode, type CategoryType,
+} from '@/lib/categories';
 
-type CategoryType = 'income' | 'expense' | 'transfer';
-
-interface Category {
-  id: number;
-  name: string;
-  type: CategoryType;
-  parentId: number | null;
+interface Category extends CategoryLite {
   icon: string | null;
   color: string | null;
   txnCount: number;
 }
 
-interface CategoryNode extends Category {
-  children: CategoryNode[];
-}
+type Node = CategoryNode<Category> & Category;
 
-const TYPE_LABELS: Record<CategoryType, string> = { expense: 'Expense', income: 'Income', transfer: 'Transfer' };
 const SWATCHES = ['#ef4444', '#f97316', '#eab308', '#10b981', '#0d9488', '#3b82f6', '#8b5cf6', '#ec4899', '#64748b'];
+
+/** Transactions in a category and everything below it. */
+const branchCount = (n: Node): number => n.txnCount + n.children.reduce((s, c) => s + branchCount(c), 0);
 
 export default function CategoriesPage() {
   const { data, error, loading, refreshing, reload } = useApi<Category[]>('/api/categories?flat=true');
   const categories = useMemo(() => (Array.isArray(data) ? data : []), [data]);
+  const byId = useMemo(() => new Map(categories.map(c => [c.id, c])), [categories]);
 
-  const [collapsed, setCollapsed] = useState<Record<CategoryType, boolean>>({ expense: false, income: false, transfer: false });
+  const [collapsedTypes, setCollapsedTypes] = useState<Record<CategoryType, boolean>>({ expense: false, income: false, transfer: false });
+  const [folded, setFolded] = useState<Set<number>>(new Set());
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Category | null>(null);
-  const [form, setForm] = useState({ name: '', type: 'expense' as CategoryType, parentId: 'none', color: SWATCHES[0] });
+  const [form, setForm] = useState({ name: '', type: 'expense' as CategoryType, parentId: null as number | null, color: SWATCHES[0] });
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
   const [deleting, setDeleting] = useState<Category | null>(null);
-  const [moving, setMoving] = useState<CategoryNode | null>(null);
+  const [moving, setMoving] = useState<Node | null>(null);
   const [message, setMessage] = useState('');
-  const labels = useMemo(() => buildCategoryItems(categories), [categories]);
 
-  const trees = useMemo(() => {
-    const map = new Map<number, CategoryNode>(categories.map(c => [c.id, { ...c, children: [] }]));
-    const roots: CategoryNode[] = [];
-    for (const node of map.values()) {
-      if (node.parentId && map.has(node.parentId)) map.get(node.parentId)!.children.push(node);
-      else roots.push(node);
-    }
-    return {
-      expense: roots.filter(c => c.type === 'expense'),
-      income: roots.filter(c => c.type === 'income'),
-      transfer: roots.filter(c => c.type === 'transfer'),
-    };
-  }, [categories]);
+  const trees = useMemo(() => ({
+    expense: nestTree(categories, 'expense'),
+    income: nestTree(categories, 'income'),
+    transfer: nestTree(categories, 'transfer'),
+  }), [categories]);
 
-  const openAdd = (type: CategoryType = 'expense', parentId?: number) => {
+  const openAdd = (type: CategoryType = 'expense', parentId: number | null = null) => {
     setEditing(null);
-    setForm({ name: '', type, parentId: parentId ? String(parentId) : 'none', color: SWATCHES[0] });
+    setForm({ name: '', type, parentId, color: parentId ? byId.get(parentId)?.color || SWATCHES[0] : SWATCHES[0] });
     setFormError('');
     setDialogOpen(true);
   };
 
   const openEdit = (c: Category) => {
     setEditing(c);
-    setForm({ name: c.name, type: c.type, parentId: c.parentId ? String(c.parentId) : 'none', color: c.color || SWATCHES[0] });
+    setForm({ name: c.name, type: c.type, parentId: c.parentId, color: c.color || SWATCHES[0] });
     setFormError('');
     setDialogOpen(true);
   };
@@ -83,12 +74,7 @@ export default function CategoriesPage() {
       await apiFetch(editing ? `/api/categories/${editing.id}` : '/api/categories', {
         method: editing ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: form.name.trim(),
-          type: form.type,
-          parentId: form.parentId === 'none' ? null : Number(form.parentId),
-          color: form.color,
-        }),
+        body: JSON.stringify({ name: form.name.trim(), type: form.type, parentId: form.parentId, color: form.color }),
       });
       setDialogOpen(false);
       reload();
@@ -99,54 +85,17 @@ export default function CategoriesPage() {
     }
   };
 
-  // Only top-level categories of the same type can be parents (one level of nesting)
-  const parentItems = useMemo(() => {
-    const items: Record<string, string> = { none: 'None (top level)' };
-    for (const c of categories) {
-      if (c.type === form.type && c.parentId === null && c.id !== editing?.id) items[String(c.id)] = c.name;
-    }
-    return items;
-  }, [categories, form.type, editing]);
-
-  const Row = ({ node, child = false }: { node: CategoryNode; child?: boolean }) => (
-    <div className={cn('group flex items-center justify-between gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-muted/50', child && 'pl-9')}>
-      <div className="flex min-w-0 items-center gap-2.5">
-        {child && <CornerDownRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />}
-        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: node.color || 'var(--muted-foreground)' }} />
-        <span className={cn('truncate text-sm', !child && 'font-medium')}>{node.name}</span>
-        <span className="tabular text-xs text-muted-foreground" title="Transactions in this category">
-          {node.txnCount > 0 ? `${node.txnCount} txn${node.txnCount === 1 ? '' : 's'}` : ''}
-        </span>
-      </div>
-      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        {!child && (
-          <Button variant="ghost" size="icon-sm" onClick={() => openAdd(node.type, node.id)} aria-label={`Add sub-category to ${node.name}`} title="Add sub-category">
-            <Plus />
-          </Button>
-        )}
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => setMoving(node)}
-          disabled={node.txnCount === 0 && !node.children.some(c => c.txnCount > 0)}
-          aria-label={`Move transactions from ${node.name}`}
-          title="Move its transactions to another category"
-        >
-          <MoveRight />
-        </Button>
-        <Button variant="ghost" size="icon-sm" onClick={() => openEdit(node)} aria-label={`Edit ${node.name}`} title="Edit"><Pencil /></Button>
-        <Button variant="ghost" size="icon-sm" className="text-destructive hover:text-destructive" onClick={() => setDeleting(node)} aria-label={`Delete ${node.name}`} title="Delete">
-          <Trash2 />
-        </Button>
-      </div>
-    </div>
-  );
+  // A parent is allowed if it's not inside the edited category's own branch and the branch still fits in 5 levels
+  const ownBranch = useMemo(() => (editing ? new Set([editing.id, ...descendantIds(editing.id, categories)]) : new Set<number>()), [editing, categories]);
+  const height = editing ? branchHeight(editing.id, categories) : 1;
+  const parentDisabled = (c: CategoryLite) => ownBranch.has(c.id) || depthOf(c, byId) + height > MAX_CATEGORY_DEPTH;
+  const toggleFold = (id: number) => setFolded(f => { const n = new Set(f); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   return (
     <>
       <PageHeader
         title="Categories"
-        description="Group your income, expenses and transfers"
+        description={`Group your income, expenses and transfers — up to ${MAX_CATEGORY_DEPTH} levels deep`}
         actions={<Button onClick={() => openAdd()}><Plus /> Add category</Button>}
       />
 
@@ -163,16 +112,16 @@ export default function CategoriesPage() {
       ) : (
         <Refreshable refreshing={refreshing} className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           {(['expense', 'income', 'transfer'] as const).map((type) => {
-            const nodes = trees[type];
+            const nodes = trees[type] as Node[];
             const count = categories.filter(c => c.type === type).length;
-            const isCollapsed = collapsed[type];
+            const isCollapsed = collapsedTypes[type];
             return (
               <section key={type} className={cn('rounded-xl border bg-card shadow-xs', type === 'expense' && 'lg:row-span-2')}>
                 <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
                   <button
                     type="button"
                     className="flex items-center gap-2 text-sm font-semibold"
-                    onClick={() => setCollapsed(c => ({ ...c, [type]: !c[type] }))}
+                    onClick={() => setCollapsedTypes(c => ({ ...c, [type]: !c[type] }))}
                     aria-expanded={!isCollapsed}
                   >
                     <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', isCollapsed && '-rotate-90')} />
@@ -187,10 +136,16 @@ export default function CategoriesPage() {
                       <p className="py-6 text-center text-sm text-muted-foreground">No {type} categories yet.</p>
                     ) : (
                       nodes.map((node) => (
-                        <div key={node.id}>
-                          <Row node={node} />
-                          {node.children.map((child) => <Row key={child.id} node={child} child />)}
-                        </div>
+                        <CategoryRow
+                          key={node.id}
+                          node={node}
+                          folded={folded}
+                          onToggle={toggleFold}
+                          onAdd={(n) => openAdd(n.type, n.id)}
+                          onMove={setMoving}
+                          onEdit={openEdit}
+                          onDelete={setDeleting}
+                        />
                       ))
                     )}
                   </div>
@@ -209,33 +164,38 @@ export default function CategoriesPage() {
           <form onSubmit={handleSave} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="cat-name">Name</Label>
-              <Input id="cat-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Groceries" required autoFocus />
+              <Input id="cat-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Office travel" required autoFocus />
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Type</Label>
-                <Select
-                  items={TYPE_LABELS}
-                  value={form.type}
-                  onValueChange={(v) => setForm({ ...form, type: (v as CategoryType) || 'expense', parentId: 'none' })}
-                  disabled={!!editing}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(Object.keys(TYPE_LABELS) as CategoryType[]).map(t => <SelectItem key={t} value={t}>{TYPE_LABELS[t]}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>Parent</Label>
-                <Select items={parentItems} value={form.parentId} onValueChange={(v) => setForm({ ...form, parentId: (v as string) || 'none' })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent className="max-h-72">
-                    {Object.entries(parentItems).map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="space-y-2">
+              <Label>Type</Label>
+              <Select
+                items={TYPE_LABELS}
+                value={form.type}
+                onValueChange={(v) => setForm({ ...form, type: (v as CategoryType) || 'expense', parentId: null })}
+                disabled={!!editing}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(TYPE_LABELS) as CategoryType[]).map(t => <SelectItem key={t} value={t}>{TYPE_LABELS[t]}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Inside</Label>
+              <CategoryPicker
+                categories={categories}
+                type={form.type}
+                value={form.parentId}
+                onChange={(id) => setForm({ ...form, parentId: id })}
+                allLabel="Nothing (top level)"
+                isDisabled={parentDisabled}
+                aria-label="Parent category"
+              />
+              <p className="text-xs text-muted-foreground">
+                Greyed-out choices would put it inside itself or go deeper than {MAX_CATEGORY_DEPTH} levels.
+              </p>
             </div>
 
             <div className="space-y-2">
@@ -274,7 +234,6 @@ export default function CategoriesPage() {
         <MoveDialog
           source={moving}
           categories={categories}
-          labels={labels}
           onClose={() => setMoving(null)}
           onMoved={(text) => { setMoving(null); setMessage(text); reload(); }}
         />
@@ -284,7 +243,7 @@ export default function CategoriesPage() {
         open={!!deleting}
         onOpenChange={(o) => !o && setDeleting(null)}
         title={`Delete ${deleting?.name ?? 'category'}?`}
-        description="It and its sub-categories are hidden from new entries; existing transactions keep their category."
+        description="It and every category inside it are hidden from new entries; existing transactions keep their category."
         onConfirm={async () => {
           await apiFetch(`/api/categories/${deleting!.id}`, { method: 'DELETE' });
           reload();
@@ -294,26 +253,80 @@ export default function CategoriesPage() {
   );
 }
 
-function MoveDialog({ source, categories, labels, onClose, onMoved }: {
-  source: CategoryNode;
+function CategoryRow({ node, folded, onToggle, onAdd, onMove, onEdit, onDelete }: {
+  node: Node;
+  folded: Set<number>;
+  onToggle: (id: number) => void;
+  onAdd: (n: Node) => void;
+  onMove: (n: Node) => void;
+  onEdit: (n: Node) => void;
+  onDelete: (n: Node) => void;
+}) {
+  const hasChildren = node.children.length > 0;
+  const isFolded = folded.has(node.id);
+  const total = branchCount(node);
+  return (
+    <>
+      <div
+        className="group flex items-center justify-between gap-3 rounded-lg py-1.5 pr-2 transition-colors hover:bg-muted/50"
+        style={{ paddingLeft: `${0.25 + (node.depth - 1) * 1.25}rem` }}
+      >
+        <div className="flex min-w-0 items-center gap-1.5">
+          {hasChildren ? (
+            <button type="button" onClick={() => onToggle(node.id)} className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted" aria-label={isFolded ? `Expand ${node.name}` : `Collapse ${node.name}`} aria-expanded={!isFolded}>
+              {isFolded ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            </button>
+          ) : (
+            <span className="w-6 shrink-0" />
+          )}
+          <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: node.color || 'var(--muted-foreground)' }} />
+          <span className={cn('truncate text-sm', node.depth === 1 && 'font-medium')}>{node.name}</span>
+          {total > 0 && (
+            <span className="tabular text-xs text-muted-foreground" title={hasChildren ? 'Transactions here and below' : 'Transactions'}>{total}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          {node.depth < MAX_CATEGORY_DEPTH && (
+            <Button variant="ghost" size="icon-sm" onClick={() => onAdd(node)} aria-label={`Add a category inside ${node.name}`} title="Add sub-category">
+              <Plus />
+            </Button>
+          )}
+          <Button variant="ghost" size="icon-sm" onClick={() => onMove(node)} disabled={total === 0} aria-label={`Move transactions from ${node.name}`} title="Move its transactions to another category">
+            <MoveRight />
+          </Button>
+          <Button variant="ghost" size="icon-sm" onClick={() => onEdit(node)} aria-label={`Edit ${node.name}`} title="Edit"><Pencil /></Button>
+          <Button variant="ghost" size="icon-sm" className="text-destructive hover:text-destructive" onClick={() => onDelete(node)} aria-label={`Delete ${node.name}`} title="Delete">
+            <Trash2 />
+          </Button>
+        </div>
+      </div>
+      {hasChildren && !isFolded && node.children.map(child => (
+        <CategoryRow key={child.id} node={child} folded={folded} onToggle={onToggle} onAdd={onAdd} onMove={onMove} onEdit={onEdit} onDelete={onDelete} />
+      ))}
+    </>
+  );
+}
+
+function MoveDialog({ source, categories, onClose, onMoved }: {
+  source: Node;
   categories: Category[];
-  labels: Record<string, string>;
   onClose: () => void;
   onMoved: (message: string) => void;
 }) {
-  const [targetId, setTargetId] = useState<string | null>(null);
-  const [includeSubs, setIncludeSubs] = useState(source.children.length > 0);
+  const [targetId, setTargetId] = useState<number | null>(null);
+  const hasBelow = source.children.length > 0;
+  const [includeSubs, setIncludeSubs] = useState(hasBelow);
   const [removeSource, setRemoveSource] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const childCount = source.children.reduce((n, c) => n + c.txnCount, 0);
-  const count = source.txnCount + (includeSubs ? childCount : 0);
-  // Same type only; not the source itself (nor its children when they move along)
-  const tree = categoryTree(categories, source.type)
-    .filter(r => r.id !== source.id)
-    .map(r => ({ ...r, children: r.children.filter(c => c.id !== source.id) }));
-  const ownChildren = includeSubs ? [] : source.children;
+  const belowCount = branchCount(source) - source.txnCount;
+  const count = source.txnCount + (includeSubs ? belowCount : 0);
+  const byId = useMemo(() => new Map(categories.map(c => [c.id, c])), [categories]);
+  const pathOf = (id: number) => {
+    const c = byId.get(id);
+    return c ? [...ancestorsOf(c, byId).map(a => a.name), c.name].join(' › ') : '';
+  };
 
   const submit = async () => {
     if (!targetId) return;
@@ -323,9 +336,9 @@ function MoveDialog({ source, categories, labels, onClose, onMoved }: {
       const res = await apiFetch<{ moved: number }>(`/api/categories/${source.id}/move`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetId: Number(targetId), includeSubcategories: includeSubs, deactivateSource: removeSource }),
+        body: JSON.stringify({ targetId, includeSubcategories: includeSubs, deactivateSource: removeSource }),
       });
-      onMoved(`Moved ${res.moved} transaction${res.moved === 1 ? '' : 's'} from ${source.name} to ${labels[targetId]}${removeSource ? ` and removed ${source.name}` : ''}.`);
+      onMoved(`Moved ${res.moved} transaction${res.moved === 1 ? '' : 's'} from ${source.name} to ${pathOf(targetId)}${removeSource ? ` and removed ${source.name}` : ''}.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not move');
       setBusy(false);
@@ -339,31 +352,28 @@ function MoveDialog({ source, categories, labels, onClose, onMoved }: {
           <DialogTitle>Move transactions from “{source.name}”</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Only the category changes — amounts, dates and account balances stay exactly the same.
-          </p>
+          <p className="text-sm text-muted-foreground">Only the category changes — amounts, dates and account balances stay exactly the same.</p>
 
           <div className="space-y-2">
             <Label>Move to</Label>
-            <Select items={labels} value={targetId} onValueChange={(v) => setTargetId((v as string) || null)}>
-              <SelectTrigger><SelectValue placeholder="Choose a category" /></SelectTrigger>
-              <SelectContent className="max-h-72">
-                {ownChildren.map(c => <SelectItem key={c.id} value={String(c.id)}>{labels[String(c.id)]}</SelectItem>)}
-                {tree.map(root => [
-                  <SelectItem key={root.id} value={String(root.id)}>{root.name}</SelectItem>,
-                  ...root.children.map(ch => <SelectItem key={ch.id} value={String(ch.id)} className="pl-6">{ch.name}</SelectItem>),
-                ])}
-              </SelectContent>
-            </Select>
+            <CategoryPicker
+              categories={categories}
+              type={source.type}
+              value={targetId}
+              onChange={setTargetId}
+              isDisabled={(c) => c.id === source.id}
+              aria-label="Target category"
+            />
           </div>
 
-          {source.children.length > 0 && (
+          {hasBelow && (
             <Toggle checked={includeSubs} onChange={setIncludeSubs}>
-              Also move the transactions of its {source.children.length} sub-categor{source.children.length === 1 ? 'y' : 'ies'} ({childCount})
+              Also move the transactions of every category inside it ({belowCount})
             </Toggle>
           )}
           <Toggle checked={removeSource} onChange={setRemoveSource}>
-            Remove “{source.name}” afterwards{source.children.length > 0 && !includeSubs ? ' (its sub-categories are kept and re-homed)' : ''}
+            Remove “{source.name}” afterwards
+            {hasBelow && !includeSubs ? ' (the categories inside it move up one level)' : ''}
           </Toggle>
 
           {error && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>}

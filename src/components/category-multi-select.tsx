@@ -5,12 +5,13 @@ import { Check, ChevronDown, Search, Tags, X } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { categoryTree, TYPE_LABELS, type CategoryLite, type CategoryType } from '@/lib/categories';
+import { CategoryTreeList, indent } from '@/components/category-picker';
+import { ancestorsOf, descendantIds, type CategoryLite } from '@/lib/categories';
 import { cn } from '@/lib/utils';
 
 /**
- * Pick any mix of main and sub categories. Picking a main category covers its sub-categories
- * (the server expands it), so its children are shown as included.
+ * Pick any mix of categories at any level. Picking a category covers everything below it
+ * (the server expands it), so those rows show as included.
  */
 export function CategoryMultiSelect({
   categories,
@@ -32,14 +33,11 @@ export function CategoryMultiSelect({
     if (next.has(c.id)) next.delete(c.id);
     else {
       next.add(c.id);
-      // a main category already covers its children
-      if (c.parentId === null) categories.filter(ch => ch.parentId === c.id).forEach(ch => next.delete(ch.id));
+      // it already covers everything below it
+      descendantIds(c.id, categories).forEach(d => next.delete(d));
     }
     onChange([...next]);
   };
-
-  const q = query.trim().toLowerCase();
-  const matches = (c: CategoryLite) => !q || c.name.toLowerCase().includes(q);
 
   const label =
     value.length === 0
@@ -49,12 +47,8 @@ export function CategoryMultiSelect({
         : `${value.length} categories`;
 
   return (
-    <Popover>
-      <PopoverTrigger
-        render={
-          <Button variant="outline" className={cn('h-9 justify-between gap-2 font-normal', className)} />
-        }
-      >
+    <Popover onOpenChange={(o) => { if (!o) setQuery(''); }}>
+      <PopoverTrigger render={<Button variant="outline" className={cn('h-9 justify-between gap-2 font-normal', className)} />}>
         <span className="flex min-w-0 items-center gap-2">
           <Tags className="h-4 w-4 shrink-0 text-muted-foreground" />
           <span className={cn('truncate', !value.length && 'text-muted-foreground')}>{label}</span>
@@ -67,34 +61,35 @@ export function CategoryMultiSelect({
           <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search categories…" className="h-8 border-0 pl-8 shadow-none focus-visible:ring-0" autoFocus />
         </div>
         <div className="max-h-80 overflow-y-auto p-1">
-          {(['expense', 'income', 'transfer'] as CategoryType[]).map(type => {
-            const roots = categoryTree(categories, type).filter(r => matches(r) || r.children.some(matches));
-            if (!roots.length) return null;
-            return (
-              <div key={type} className="pb-1">
-                <p className="px-2 pt-2 pb-1 text-xs font-medium text-muted-foreground">{TYPE_LABELS[type]}</p>
-                {roots.map(root => {
-                  const rootOn = selected.has(root.id);
-                  return (
-                    <div key={root.id}>
-                      <Row label={root.name} checked={rootOn} count={root.txnCount} onClick={() => toggle(root)} />
-                      {root.children.filter(ch => matches(ch) || matches(root)).map(ch => (
-                        <Row
-                          key={ch.id}
-                          label={ch.name}
-                          checked={rootOn || selected.has(ch.id)}
-                          implied={rootOn}
-                          count={ch.txnCount}
-                          indent
-                          onClick={() => !rootOn && toggle(ch)}
-                        />
-                      ))}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
+          <CategoryTreeList
+            categories={categories}
+            query={query}
+            renderRow={(c, searching) => {
+              const covered = ancestorsOf(c, byId).some(a => selected.has(a.id));
+              const checked = covered || selected.has(c.id);
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={checked}
+                  onClick={() => !covered && toggle(c)}
+                  style={indent(c.depth)}
+                  title={covered ? 'Included through a category above it' : undefined}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left text-sm transition-colors hover:bg-accent',
+                    covered && 'cursor-default text-muted-foreground hover:bg-transparent',
+                  )}
+                >
+                  <span className={cn('flex h-4 w-4 shrink-0 items-center justify-center rounded border', checked ? 'border-primary bg-primary text-primary-foreground' : 'border-input', covered && 'opacity-60')}>
+                    {checked && <Check className="h-3 w-3" />}
+                  </span>
+                  <span className={cn('flex-1 truncate', c.depth === 1 && 'font-medium')}>{searching && c.depth > 1 ? c.path : c.name}</span>
+                  {c.txnCount !== undefined && <span className="tabular text-xs text-muted-foreground">{c.txnCount}</span>}
+                </button>
+              );
+            }}
+          />
         </div>
         {value.length > 0 && (
           <div className="flex items-center justify-between border-t px-3 py-2 text-xs text-muted-foreground">
@@ -106,30 +101,5 @@ export function CategoryMultiSelect({
         )}
       </PopoverContent>
     </Popover>
-  );
-}
-
-function Row({ label, checked, implied, indent, count, onClick }: {
-  label: string; checked: boolean; implied?: boolean; indent?: boolean; count?: number; onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      onClick={onClick}
-      className={cn(
-        'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent',
-        indent && 'pl-7',
-        implied && 'cursor-default text-muted-foreground hover:bg-transparent',
-      )}
-      title={implied ? 'Included through its main category' : undefined}
-    >
-      <span className={cn('flex h-4 w-4 shrink-0 items-center justify-center rounded border', checked ? 'border-primary bg-primary text-primary-foreground' : 'border-input', implied && 'opacity-60')}>
-        {checked && <Check className="h-3 w-3" />}
-      </span>
-      <span className="flex-1 truncate">{label}</span>
-      {count !== undefined && <span className="tabular text-xs text-muted-foreground">{count}</span>}
-    </button>
   );
 }

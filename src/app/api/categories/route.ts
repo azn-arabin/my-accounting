@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { accounts, categories, transactions } from "@/db/schema";
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
+import { depthOf, MAX_CATEGORY_DEPTH, nestTree } from "@/lib/categories";
 
 const TYPES = ["income", "expense", "transfer"] as const;
 
@@ -36,10 +37,7 @@ export async function GET(request: Request) {
 
     if (isFlat) return NextResponse.json(rows);
 
-    const tree = rows
-      .filter(c => !c.parentId)
-      .map(cat => ({ ...cat, children: rows.filter(c => c.parentId === cat.id) }));
-    return NextResponse.json(tree);
+    return NextResponse.json(nestTree(rows));
   } catch (error) {
     console.error("Error fetching categories:", error);
     return NextResponse.json({ error: "Failed to fetch categories" }, { status: 500 });
@@ -58,10 +56,14 @@ export async function POST(request: Request) {
     }
 
     if (parentId) {
-      const [parent] = await db.select().from(categories).where(and(eq(categories.id, parentId), eq(categories.isActive, true)));
-      if (!parent) return NextResponse.json({ error: "Parent category not found" }, { status: 400 });
+      const all = await db.select({ id: categories.id, parentId: categories.parentId, type: categories.type, isActive: categories.isActive }).from(categories);
+      const byId = new Map(all.map(c => [c.id, c]));
+      const parent = byId.get(parentId);
+      if (!parent || !parent.isActive) return NextResponse.json({ error: "Parent category not found" }, { status: 400 });
       if (parent.type !== type) return NextResponse.json({ error: `Parent is a ${parent.type} category` }, { status: 400 });
-      if (parent.parentId) return NextResponse.json({ error: "Sub-categories can't have their own sub-categories" }, { status: 400 });
+      if (depthOf(parent, byId) >= MAX_CATEGORY_DEPTH) {
+        return NextResponse.json({ error: `Categories can be at most ${MAX_CATEGORY_DEPTH} levels deep` }, { status: 400 });
+      }
     }
 
     const [newCategory] = await db.insert(categories).values({
